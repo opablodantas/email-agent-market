@@ -1,937 +1,710 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+EMAIL AGENT MARKET - MVP ROBUSTO
+Versão corrigida para execução em qualquer sistema operacional
+"""
+
 import os
+import sys
 import time
 import sqlite3
 import base64
 import re
 import json
+import logging
+from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from google.auth.transport.requests import Request
+# Verificar dependências críticas
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from google.auth.transport.requests import Request
+except ImportError as e:
+    print(f"❌ ERRO CRÍTICO: Biblioteca Google não encontrada: {e}")
+    print("💡 Execute: pip install google-api-python-client google-auth-oauthlib")
+    sys.exit(1)
 
-from ollama import chat  # ✅ integração com Ollama
-
-# ==============================
-# CONFIGURAÇÕES
-# ==============================
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
-TOKEN_FILE = "token.json"
-CLIENT_SECRET_FILE = "credentials.json"
-DB_CLIENTES = "clientes.db"
-ARQ_PRODUTOS = "produtos.txt"
-
-COOLDOWN = timedelta(minutes=10)
-ultimos_emails = {}
-
-# ==============================
-# BANCO DE DADOS
-# ==============================
-def inicializar_banco():
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-
-    # tabela clientes
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS clientes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            nome TEXT
-        )
-    ''')
-
-    # tabela produtos
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS produtos (
-            id INTEGER PRIMARY KEY,
-            descricao TEXT NOT NULL,
-            preco_un REAL NOT NULL
-        )
-    ''')
-
-    # tabela pedidos
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pedidos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_cliente INTEGER,
-            data TEXT NOT NULL,
-            status TEXT DEFAULT 'pendente',
-            FOREIGN KEY (id_cliente) REFERENCES clientes (id)
-        )
-    ''')
-
-    # tabela pedidos_produtos
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pedidos_produtos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_pedido INTEGER,
-            id_produto INTEGER,
-            quantidade INTEGER,
-            corrigido BOOLEAN DEFAULT FALSE,
-            FOREIGN KEY (id_pedido) REFERENCES pedidos (id),
-            FOREIGN KEY (id_produto) REFERENCES produtos (id)
-        )
-    ''')
-
-    # tabela logs_envio
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS logs_envio (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_cliente INTEGER,
-            email TEXT NOT NULL,
-            mensagem_enviada TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            tipo_agente TEXT NOT NULL,
-            FOREIGN KEY (id_cliente) REFERENCES clientes (id)
-        )
-    ''')
-
-    # tabela correcoes
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS correcoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_pedido INTEGER,
-            id_produto INTEGER,
-            quantidade_original INTEGER,
-            quantidade_corrigida INTEGER,
-            data_correcao TEXT NOT NULL,
-            FOREIGN KEY (id_pedido) REFERENCES pedidos (id),
-            FOREIGN KEY (id_produto) REFERENCES produtos (id)
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
+try:
+    from ollama import chat
+except ImportError as e:
+    print(f"❌ ERRO CRÍTICO: Ollama não encontrado: {e}")
+    print("💡 Execute: pip install ollama")
+    sys.exit(1)
 
 # ==============================
-# PRODUTOS TXT -> DB
+# CONFIGURAÇÃO ROBUSTA
 # ==============================
-def atualizar_produtos():
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
+class Config:
+    def __init__(self):
+        self.BASE_DIR = Path(__file__).parent.absolute()
+        self.ensure_directories()
+        
+        self.SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+        self.TOKEN_FILE = self.BASE_DIR / "token.json"
+        self.CLIENT_SECRET_FILE = self.BASE_DIR / "credentials.json"
+        self.DB_CLIENTES = self.BASE_DIR / "clientes.db"
+        self.ARQ_PRODUTOS = self.BASE_DIR / "produtos.txt"
+        self.LOG_FILE = self.BASE_DIR / "email_agent.log"
+        
+        self.COOLDOWN = timedelta(minutes=10)
+        self.MAX_EMAILS_PROCESS = 10
+        self.CHECK_INTERVAL = 30  # segundos
+        
+        # Configurar logging
+        self.setup_logging()
+    
+    def ensure_directories(self):
+        """Garante que todos os diretórios necessários existam"""
+        self.BASE_DIR.mkdir(exist_ok=True)
+    
+    def setup_logging(self):
+        """Configura sistema de logging robusto"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(self.LOG_FILE, encoding='utf-8'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+    
+    def validate_environment(self):
+        """Valida se o ambiente está pronto para execução"""
+        errors = []
+        
+        # Verificar arquivos necessários
+        if not self.CLIENT_SECRET_FILE.exists():
+            errors.append(f"Arquivo {self.CLIENT_SECRET_FILE} não encontrado")
+        
+        if not self.ARQ_PRODUTOS.exists():
+            errors.append(f"Arquivo {self.ARQ_PRODUTOS} não encontrado")
+        
+        # Verificar permissões
+        if not os.access(self.BASE_DIR, os.W_OK):
+            errors.append(f"Sem permissão de escrita em {self.BASE_DIR}")
+        
+        if errors:
+            self.logger.error("❌ ERROS DE AMBIENTE:")
+            for error in errors:
+                self.logger.error(f"   - {error}")
+            return False
+        
+        self.logger.info("✅ Ambiente validado com sucesso")
+        return True
 
-    if not os.path.exists(ARQ_PRODUTOS):
-        print("📁 Arquivo produtos.txt não encontrado.")
-        return
+# Configuração global
+config = Config()
 
-    with open(ARQ_PRODUTOS, "r", encoding="utf-8") as f:
-        linhas = f.readlines()
-
-    produtos_novos = 0
-    for linha in linhas:
-        linha = linha.strip()
-        if linha.startswith("produto_id") or not linha:
-            continue
+# ==============================
+# BANCO DE DADOS ROBUSTO
+# ==============================
+class DatabaseManager:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.ensure_tables()
+    
+    def get_connection(self):
+        """Retorna conexão com tratamento de erro"""
         try:
-            parts = [p.strip().rstrip("),") for p in linha.split(",")]
-            if len(parts) < 3:
-                continue
-            produto_id, descricao, preco = int(parts[0]), parts[1], float(parts[2])
-            cursor.execute("SELECT * FROM produtos WHERE id = ?", (produto_id,))
-            if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO produtos (id, descricao, preco_un) VALUES (?, ?, ?)",
-                    (produto_id, descricao, preco)
-                )
-                print(f"🆕 Produto adicionado: ID {produto_id} | {descricao} | R${preco:.2f}")
-                produtos_novos += 1
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA journal_mode = WAL")
+            return conn
+        except sqlite3.Error as e:
+            config.logger.error(f"❌ Erro de banco de dados: {e}")
+            raise
+    
+    def ensure_tables(self):
+        """Garante que todas as tabelas existam"""
+        tables = [
+            # Tabela clientes
+            '''
+            CREATE TABLE IF NOT EXISTS clientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                nome TEXT,
+                data_cadastro TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            ''',
+            # Tabela produtos
+            '''
+            CREATE TABLE IF NOT EXISTS produtos (
+                id INTEGER PRIMARY KEY,
+                descricao TEXT NOT NULL,
+                preco_un REAL NOT NULL
+            )
+            ''',
+            # Tabela pedidos
+            '''
+            CREATE TABLE IF NOT EXISTS pedidos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_cliente INTEGER,
+                data TEXT NOT NULL,
+                status TEXT DEFAULT 'pendente',
+                id_email TEXT UNIQUE,
+                FOREIGN KEY (id_cliente) REFERENCES clientes (id) ON DELETE CASCADE
+            )
+            ''',
+            # Tabela pedidos_produtos
+            '''
+            CREATE TABLE IF NOT EXISTS pedidos_produtos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_pedido INTEGER,
+                id_produto INTEGER,
+                quantidade INTEGER,
+                corrigido BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (id_pedido) REFERENCES pedidos (id) ON DELETE CASCADE,
+                FOREIGN KEY (id_produto) REFERENCES produtos (id) ON DELETE CASCADE
+            )
+            ''',
+            # Tabela logs_envio
+            '''
+            CREATE TABLE IF NOT EXISTS logs_envio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_cliente INTEGER,
+                email TEXT NOT NULL,
+                mensagem_enviada TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                tipo_agente TEXT NOT NULL,
+                FOREIGN KEY (id_cliente) REFERENCES clientes (id) ON DELETE SET NULL
+            )
+            ''',
+            # Tabela correcoes
+            '''
+            CREATE TABLE IF NOT EXISTS correcoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_pedido INTEGER,
+                id_produto INTEGER,
+                quantidade_original INTEGER,
+                quantidade_corrigida INTEGER,
+                data_correcao TEXT NOT NULL,
+                FOREIGN KEY (id_pedido) REFERENCES pedidos (id) ON DELETE CASCADE,
+                FOREIGN KEY (id_produto) REFERENCES produtos (id) ON DELETE CASCADE
+            )
+            ''',
+            # Tabela emails_processados (CRÍTICA - controle de estado)
+            '''
+            CREATE TABLE IF NOT EXISTS emails_processados (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_email TEXT UNIQUE NOT NULL,
+                data_processamento TEXT NOT NULL,
+                remetente TEXT NOT NULL,
+                assunto TEXT NOT NULL
+            )
+            '''
+        ]
+        
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            for table_sql in tables:
+                cursor.execute(table_sql)
+            conn.commit()
+            config.logger.info("✅ Tabelas do banco validadas")
+        except sqlite3.Error as e:
+            config.logger.error(f"❌ Erro ao criar tabelas: {e}")
+            raise
+        finally:
+            conn.close()
+
+# ==============================
+# AUTENTICAÇÃO GMAIL ROBUSTA
+# ==============================
+class GmailAuthenticator:
+    def __init__(self):
+        self.service = None
+    
+    def authenticate(self):
+        """Autenticação robusta com fallbacks"""
+        creds = None
+        
+        # Tentar carregar token existente
+        if config.TOKEN_FILE.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(config.TOKEN_FILE), config.SCOPES)
+                config.logger.info("✅ Token carregado do arquivo")
+            except Exception as e:
+                config.logger.warning(f"⚠️ Token inválido: {e}")
+                # Remover token corrompido
+                try:
+                    config.TOKEN_FILE.unlink()
+                    config.logger.info("🗑️ Token inválido removido")
+                except:
+                    pass
+        
+        # Se não tem credenciais válidas, fazer autenticação
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    config.logger.info("✅ Token renovado")
+                except Exception as e:
+                    config.logger.warning(f"⚠️ Falha ao renovar token: {e}")
+                    creds = None
+            
+            if not creds:
+                if not config.CLIENT_SECRET_FILE.exists():
+                    config.logger.error(f"❌ Arquivo {config.CLIENT_SECRET_FILE} não encontrado")
+                    return None
+                
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        str(config.CLIENT_SECRET_FILE), config.SCOPES
+                    )
+                    creds = flow.run_local_server(port=8080, open_browser=True)
+                    
+                    # Salvar token para uso futuro
+                    with open(config.TOKEN_FILE, 'w', encoding='utf-8') as token:
+                        token.write(creds.to_json())
+                    config.logger.info("✅ Nova autenticação concluída")
+                    
+                except Exception as e:
+                    config.logger.error(f"❌ Erro na autenticação: {e}")
+                    return None
+        
+        try:
+            self.service = build('gmail', 'v1', credentials=creds)
+            # Testar conexão
+            self.service.users().getProfile(userId='me').execute()
+            config.logger.info("✅ Autenticação Gmail validada")
+            return self.service
         except Exception as e:
-            print(f"⚠️ Erro ao processar linha '{linha}': {e}")
-
-    if produtos_novos == 0:
-        print("✅ Nenhum produto novo para adicionar.")
-    else:
-        print(f"📊 Total de produtos novos adicionados: {produtos_novos}")
-
-    conn.commit()
-    conn.close()
+            config.logger.error(f"❌ Falha na conexão Gmail: {e}")
+            return None
 
 # ==============================
-# FUNÇÕES DE CLIENTE E LOG
+# GESTÃO DE PRODUTOS
 # ==============================
-def cliente_existe(email):
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM clientes WHERE email = ?", (email,))
-    resultado = cursor.fetchone()
-    conn.close()
-    return resultado is not None
-
-def cadastrar_cliente(email, nome=None):
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO clientes (email, nome) VALUES (?, ?)", (email, nome))
-    conn.commit()
-    conn.close()
-
-def registrar_log(email, mensagem, tipo_agente):
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM clientes WHERE email = ?", (email,))
-    cliente = cursor.fetchone()
-    id_cliente = cliente[0] if cliente else None
-
-    cursor.execute(
-        "INSERT INTO logs_envio (id_cliente, email, mensagem_enviada, timestamp, tipo_agente) VALUES (?, ?, ?, ?, ?)",
-        (id_cliente, email, mensagem, datetime.now().isoformat(), tipo_agente)
-    )
-    conn.commit()
-    conn.close()
-
-# ==============================
-# AUTENTICAÇÃO GMAIL
-# ==============================
-def autenticar_gmail():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=8080)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-    return build('gmail', 'v1', credentials=creds)
-
-# ==============================
-# AGENTE ORQUESTRADOR
-# ==============================
-def classificar_intencao_email(corpo_email, assunto):
-    """Classifica a intenção do email para direcionar ao agente correto"""
+class ProductManager:
+    def __init__(self, db_manager):
+        self.db = db_manager
     
-    corpo_lower = corpo_email.lower()
-    assunto_lower = assunto.lower()
-    
-    # Palavras-chave para cada tipo de intenção
-    palavras_pedido = ['orçamento', 'pedido', 'solicitar', 'comprar', 'cotação', 'preço', 'valor']
-    palavras_duvida = ['dúvida', 'duvida', 'pergunta', 'como funciona', 'prazo', 'entrega', 'pagamento', 'troca']
-    palavras_reclamacao = ['reclamação', 'reclamacao', 'problema', 'erro', 'faltando', 'quebrado', 'defeito', 'devolução']
-    palavras_negociacao = ['proposta', 'oferta', 'negociar', 'desconto', 'melhor preço', 'contraproposta']
-    
-    # Verificar intenções por ordem de prioridade
-    if any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras_reclamacao):
-        return "reclamacao"
-    elif any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras_negociacao):
-        return "negociacao"
-    elif any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras_duvida):
-        return "duvida"
-    elif any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras_pedido):
-        return "pedido"
-    else:
-        # Usar Ollama para classificação mais precisa
-        return classificar_intencao_ollama(corpo_email, assunto)
-
-def classificar_intencao_ollama(corpo_email, assunto):
-    """Usa Ollama para classificação mais precisa da intenção"""
-    
-    prompt = f"""
-Classifique a intenção deste email em uma das categorias: pedido, duvida, reclamacao, negociacao.
-
-Assunto: {assunto}
-Corpo: {corpo_email[:500]}
-
-Responda APENAS com uma das palavras: pedido, duvida, reclamacao, negociacao
-"""
-    
-    try:
-        resposta = chat(
-            model="llama3",
-            messages=[
-                {"role": "system", "content": "Você é um classificador de intenções de emails."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        intencao = resposta["message"]["content"].strip().lower()
-        return intencao
-    except:
-        return "pedido"  # Fallback
-
-# ==============================
-# AGENTE NEGOCIADOR
-# ==============================
-def calcular_orcamento(produtos_pedido):
-    """Calcula o orçamento completo com descontos e condições"""
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    
-    orcamento = {
-        'itens': [],
-        'subtotal': 0,
-        'descontos': [],
-        'total_unidades': 0,
-        'total_final': 0,
-        'condicoes_pagamento': []
-    }
-    
-    # Calcular subtotal e totais
-    for produto in produtos_pedido:
-        cursor.execute("SELECT descricao, preco_un FROM produtos WHERE id = ?", (produto['id'],))
-        resultado = cursor.fetchone()
-        
-        if resultado:
-            descricao, preco_un = resultado
-            subtotal_item = preco_un * produto['quantidade']
-            
-            orcamento['itens'].append({
-                'id': produto['id'],
-                'descricao': descricao,
-                'quantidade': produto['quantidade'],
-                'preco_un': preco_un,
-                'subtotal': subtotal_item
-            })
-            
-            orcamento['subtotal'] += subtotal_item
-            orcamento['total_unidades'] += produto['quantidade']
-    
-    orcamento['total_final'] = orcamento['subtotal']
-    
-    # Aplicar condições de desconto
-    # 1. Desconto por quantidade (acima de 500 unidades)
-    if orcamento['total_unidades'] > 500:
-        desconto = orcamento['subtotal'] * 0.10
-        orcamento['total_final'] -= desconto
-        orcamento['descontos'].append({
-            'tipo': 'Quantidade (10%)',
-            'valor': desconto
-        })
-    
-    # 2. Frete grátis (acima de 1000 unidades) - considerado como desconto simbólico
-    if orcamento['total_unidades'] > 1000:
-        orcamento['descontos'].append({
-            'tipo': 'Frete Grátis',
-            'valor': 'GRÁTIS'
-        })
-    
-    # 3. Condições de pagamento
-    orcamento['condicoes_pagamento'].append("À vista: 5% de desconto")
-    orcamento['condicoes_pagamento'].append("Parcelamento em até 3x sem juros")
-    
-    conn.close()
-    return orcamento
-
-def gerar_resposta_negociador(orcamento, cliente_novo=True, contra_proposta=False):
-    """Gera a resposta do agente negociador com orçamento detalhado"""
-    
-    if contra_proposta:
-        return """
-Obrigado pela sua contraproposta!
-
-Analisando sua solicitação, identificamos que ela foge das nossas condições padrão de negociação. 
-
-Para garantir que possamos atendê-lo da melhor forma possível, vou transferir seu atendimento para nosso negociador humano especializado.
-
-Em até 24 horas úteis, um de nossos representantes entrará em contato para discutir as melhores condições possíveis para seu pedido.
-
-Agradecemos sua compreensão e estamos à disposição para qualquer esclarecimento adicional.
-
-Atenciosamente,
-Equipe de Vendas - Fábrica de Utensílios Domésticos
-"""
-    
-    # Montar o texto do orçamento
-    texto_orcamento = f"""
-📋 **ORÇAMENTO DETALHADO**
-
-"""
-    
-    # Itens do pedido
-    for item in orcamento['itens']:
-        texto_orcamento += f"• {item['descricao']}: {item['quantidade']} und × R${item['preco_un']:.2f} = R${item['subtotal']:.2f}\n"
-    
-    texto_orcamento += f"\n📊 **RESUMO DO PEDIDO**\n"
-    texto_orcamento += f"Subtotal: R${orcamento['subtotal']:.2f}\n"
-    texto_orcamento += f"Total de unidades: {orcamento['total_unidades']}\n"
-    
-    # Descontos aplicados
-    if orcamento['descontos']:
-        texto_orcamento += f"\n🎁 **DESCONTOS APLICADOS**\n"
-        for desconto in orcamento['descontos']:
-            if desconto['tipo'] == 'Frete Grátis':
-                texto_orcamento += f"• {desconto['tipo']}: {desconto['valor']}\n"
-            else:
-                texto_orcamento += f"• {desconto['tipo']}: R${desconto['valor']:.2f}\n"
-    
-    texto_orcamento += f"💰 **TOTAL FINAL: R${orcamento['total_final']:.2f}**\n"
-    
-    # Condições de pagamento
-    texto_orcamento += f"\n💳 **CONDIÇÕES DE PAGAMENTO**\n"
-    for condicao in orcamento['condicoes_pagamento']:
-        texto_orcamento += f"• {condicao}\n"
-    
-    # Avisos sobre descontos adicionais
-    texto_orcamento += f"\n💡 **OBSERVAÇÕES**\n"
-    if orcamento['total_unidades'] <= 500:
-        texto_orcamento += f"• Faltam {501 - orcamento['total_unidades']} unidades para ganhar 10% de desconto!\n"
-    if orcamento['total_unidades'] <= 1000:
-        texto_orcamento += f"• Faltam {1001 - orcamento['total_unidades']} unidades para frete grátis!\n"
-    
-    # Mensagem personalizada
-    if cliente_novo:
-        saudacao = "Agradecemos seu interesse em nossos produtos!"
-    else:
-        saudacao = "É um prazer atendê-lo novamente!"
-    
-    mensagem_final = f"""
-{saudacao}
-
-{texto_orcamento}
-
-**💬 Possui alguma contraproposta?**
-Caso deseje negociar condições diferentes, responda este email com sua proposta. Para propostas complexas, nosso negociador humano entrará em contato.
-
-Estamos à disposição para quaisquer esclarecimentos adicionais.
-
-Atenciosamente,
-Equipe de Vendas - Fábrica de Utensílios Domésticos
-"""
-    
-    return mensagem_final
-
-# ==============================
-# AGENTE DE DÚVIDAS
-# ==============================
-def gerar_resposta_duvidas(corpo_email, cliente_novo=True):
-    """Agente especializado em tirar dúvidas"""
-    
-    prompt = f"""
-Você é um atendente especializado em tirar dúvidas de uma fábrica de utensílios domésticos.
-
-Dúvida do cliente:
----
-{corpo_email}
----
-
-Informações importantes para suas respostas:
-- Prazo de entrega: 5-10 dias úteis para grandes centros, 10-15 dias para interior
-- Condições de pagamento: À vista com 5% desconto ou parcelado em até 3x sem juros
-- Trocas: 30 dias para trocas de produtos com defeito
-- Fretes: Grátis para compras acima de 1000 unidades
-- Contato humano: sac@fabricautensilios.com.br
-
-Responda de forma clara, objetiva e educada, usando as informações acima quando relevantes.
-"""
-    
-    try:
-        resposta = chat(
-            model="llama3",
-            messages=[
-                {"role": "system", "content": "Você é um atendente educado e informativo que responde dúvidas de clientes."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return resposta["message"]["content"]
-    except Exception as e:
-        return f"""
-Obrigado pelo seu contato!
-
-Em relação à sua dúvida, aqui estão algumas informações gerais:
-
-📦 **Prazos de Entrega:** 5-10 dias úteis para grandes centros, 10-15 dias para interior
-💳 **Pagamento:** À vista com 5% desconto ou parcelado em até 3x sem juros
-🔄 **Trocas:** 30 dias para produtos com defeito
-🚚 **Frete:** Grátis para compras acima de 1000 unidades
-
-Para informações mais específicas sobre sua dúvida, entre em contato com nosso atendimento humano: sac@fabricautensilios.com.br
-
-Atenciosamente,
-Equipe de Atendimento
-"""
-
-# ==============================
-# AGENTE DE RECLAMAÇÕES
-# ==============================
-def gerar_resposta_reclamacao(corpo_email):
-    """Agente especializado em tratar reclamações"""
-    
-    prompt = f"""
-Você é um atendente especializado em tratar reclamações de uma fábrica de utensílios domésticos.
-
-Reclamação do cliente:
----
-{corpo_email}
----
-
-Sua função é:
-1. Pedir desculpas pelo ocorrido
-2. Solicitar informações específicas (número do pedido, produtos com problema)
-3. Informar que o caso será encaminhado para nossa equipe especializada
-4. Dar um prazo para retorno (24-48 horas)
-
-Seja empático, profissional e ofereça uma solução adequada.
-"""
-    
-    try:
-        resposta = chat(
-            model="llama3",
-            messages=[
-                {"role": "system", "content": "Você é um atendente empático que trata reclamações de clientes."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return resposta["message"]["content"]
-    except Exception as e:
-        return """
-Lamentamos muito pelo ocorrido!
-
-Para podermos resolver sua situação da melhor forma possível, precisamos de algumas informações:
-
-📋 **Número do pedido:**
-🛍️ **Produtos com problema:**
-📝 **Descrição detalhada do problema:**
-
-Nossa equipe especializada entrará em contato em até 24 horas úteis para resolver sua situação.
-
-Agradecemos sua paciência e compreensão.
-
-Atenciosamente,
-Equipe de Atendimento ao Cliente
-"""
-
-# ==============================
-# DETECÇÃO DE CONTRAPROPOSTA
-# ==============================
-def detectar_contra_proposta(corpo_email):
-    """Detecta se o cliente está fazendo uma contraproposta"""
-    
-    palavras_chave = [
-        'proposta', 'oferta', 'negociar', 'desconto', 'melhor preço', 
-        'contraproposta', 'abaixo', 'menor', 'reduzir', 'flexibilizar',
-        'condições melhores', 'outra proposta'
-    ]
-    
-    corpo_lower = corpo_email.lower()
-    
-    # Verifica palavras-chave
-    if any(palavra in corpo_lower for palavra in palavras_chave):
-        return True
-    
-    # Verifica números que podem indicar proposta (valores, quantidades)
-    numeros = re.findall(r'\b\d+\b', corpo_email)
-    if len(numeros) > 2:  # Se tem vários números, pode ser proposta
-        return True
-    
-    return False
-
-# ==============================
-# INTERFACE PARA CORREÇÕES
-# ==============================
-def exibir_interface_correcoes():
-    """Interface simples para correção de pedidos"""
-    print("\n" + "="*50)
-    print("🔧 INTERFACE DE CORREÇÃO DE PEDIDOS")
-    print("="*50)
-    
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    
-    # Buscar pedidos pendentes de correção
-    cursor.execute('''
-        SELECT p.id, c.email, p.data, COUNT(pp.id) as total_itens
-        FROM pedidos p
-        JOIN clientes c ON p.id_cliente = c.id
-        JOIN pedidos_produtos pp ON p.id = pp.id_pedido
-        WHERE pp.corrigido = FALSE
-        GROUP BY p.id
-        ORDER BY p.data DESC
-    ''')
-    
-    pedidos = cursor.fetchall()
-    
-    if not pedidos:
-        print("✅ Nenhum pedido pendente de correção.")
-        return
-    
-    print("\n📋 Pedidos pendentes de correção:")
-    for i, (pedido_id, email, data, total_itens) in enumerate(pedidos, 1):
-        print(f"{i}. Pedido #{pedido_id} - {email} - {data} - {total_itens} itens")
-    
-    try:
-        opcao = int(input("\nSelecione o pedido para correção (0 para voltar): "))
-        if opcao == 0:
-            return
-        
-        pedido_selecionado = pedidos[opcao-1][0]
-        corrigir_pedido(pedido_selecionado, conn, cursor)
-        
-    except (ValueError, IndexError):
-        print("❌ Opção inválida.")
-    
-    conn.close()
-
-def corrigir_pedido(pedido_id, conn, cursor):
-    """Corrige um pedido específico"""
-    
-    print(f"\n📝 Corrigindo Pedido #{pedido_id}")
-    print("-" * 30)
-    
-    # Buscar itens do pedido
-    cursor.execute('''
-        SELECT pp.id, pr.descricao, pp.quantidade, pr.preco_un
-        FROM pedidos_produtos pp
-        JOIN produtos pr ON pp.id_produto = pr.id
-        WHERE pp.id_pedido = ? AND pp.corrigido = FALSE
-    ''', (pedido_id,))
-    
-    itens = cursor.fetchall()
-    
-    for item_id, descricao, quantidade, preco in itens:
-        print(f"\n🛍️ Produto: {descricao}")
-        print(f"📦 Quantidade atual: {quantidade}")
-        print(f"💰 Preço unitário: R${preco:.2f}")
+    def update_products(self):
+        """Atualiza produtos do arquivo com tratamento robusto"""
+        if not config.ARQ_PRODUTOS.exists():
+            config.logger.error(f"❌ Arquivo {config.ARQ_PRODUTOS} não encontrado")
+            return False
         
         try:
-            nova_quantidade = int(input("Nova quantidade (0 para remover, Enter para manter): ") or quantidade)
+            with open(config.ARQ_PRODUTOS, 'r', encoding='utf-8') as f:
+                linhas = f.readlines()
+        except Exception as e:
+            config.logger.error(f"❌ Erro ao ler arquivo de produtos: {e}")
+            return False
+        
+        produtos_novos = 0
+        conn = self.db.get_connection()
+        
+        try:
+            cursor = conn.cursor()
+            for num_linha, linha in enumerate(linhas, 1):
+                linha = linha.strip()
+                if linha.startswith("produto_id") or not linha:
+                    continue
+                
+                try:
+                    # Processamento robusto da linha
+                    parts = [p.strip().rstrip("),") for p in linha.split(",")]
+                    if len(parts) < 3:
+                        config.logger.warning(f"⚠️ Linha {num_linha} ignorada: formato inválido")
+                        continue
+                    
+                    produto_id = int(parts[0])
+                    descricao = parts[1]
+                    preco = float(parts[2])
+                    
+                    # Verificar se produto já existe
+                    cursor.execute("SELECT 1 FROM produtos WHERE id = ?", (produto_id,))
+                    if not cursor.fetchone():
+                        cursor.execute(
+                            "INSERT INTO produtos (id, descricao, preco_un) VALUES (?, ?, ?)",
+                            (produto_id, descricao, preco)
+                        )
+                        produtos_novos += 1
+                        config.logger.info(f"🆕 Produto adicionado: ID {produto_id} | {descricao}")
+                        
+                except (ValueError, IndexError) as e:
+                    config.logger.warning(f"⚠️ Erro na linha {num_linha} '{linha}': {e}")
+                    continue
             
-            if nova_quantidade == 0:
-                cursor.execute("DELETE FROM pedidos_produtos WHERE id = ?", (item_id,))
-                print("❌ Produto removido do pedido.")
+            conn.commit()
+            
+            if produtos_novos == 0:
+                config.logger.info("✅ Nenhum produto novo para adicionar")
             else:
-                cursor.execute("UPDATE pedidos_produtos SET quantidade = ?, corrigido = TRUE WHERE id = ?", 
-                             (nova_quantidade, item_id))
+                config.logger.info(f"📊 Total de produtos novos: {produtos_novos}")
                 
-                # Registrar correção
-                cursor.execute('''
-                    INSERT INTO correcoes (id_pedido, id_produto, quantidade_original, quantidade_corrigida, data_correcao)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (pedido_id, item_id, quantidade, nova_quantidade, datetime.now().isoformat()))
-                
-                print(f"✅ Quantidade corrigida para {nova_quantidade}")
-                
-        except ValueError:
-            print("❌ Valor inválido. Mantendo quantidade original.")
-    
-    conn.commit()
-    print(f"\n✅ Pedido #{pedido_id} corrigido com sucesso!")
-
-# ==============================
-# FUNÇÃO PARA ENVIO DE ERRATA
-# ==============================
-def enviar_email_correcao(service, pedido_id, destinatario):
-    """Envia email de correção após ajuste humano"""
-    
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    
-    # Buscar dados do pedido corrigido
-    cursor.execute('''
-        SELECT pr.descricao, pp.quantidade, pr.preco_un, c.quantidade_original
-        FROM pedidos_produtos pp
-        JOIN produtos pr ON pp.id_produto = pr.id
-        LEFT JOIN correcoes c ON pp.id_pedido = c.id_pedido AND pp.id_produto = c.id_produto
-        WHERE pp.id_pedido = ?
-    ''', (pedido_id,))
-    
-    itens = cursor.fetchall()
-    
-    mensagem = f"""
-Prezado cliente,
-
-Identificamos a necessidade de corrigir seu pedido #{pedido_id} conforme ajustado com nosso atendente.
-
-📋 **PEDIDO CORRIGIDO:**
-
-"""
-    
-    for descricao, quantidade, preco, original in itens:
-        if original and original != quantidade:
-            mensagem += f"• {descricao}: {original} → {quantidade} unidades\n"
-        else:
-            mensagem += f"• {descricao}: {quantidade} unidades\n"
-    
-    mensagem += f"""
-    
-Agradecemos pela compreensão e estamos à disposição para quaisquer esclarecimentos.
-
-Atenciosamente,
-Equipe de Vendas - Fábrica de Utensílios Domésticos
-"""
-    
-    enviar_email(service, destinatario, f"[ERRATA] Correção do Pedido #{pedido_id}", mensagem)
-    conn.close()
-
-# ==============================
-# RECONHECIMENTO DE PRODUTOS (MELHORADO PARA PLURAIS)
-# ==============================
-def normalizar_palavra(palavra):
-    """Remove plural e transforma para minúsculo"""
-    palavra = palavra.lower().strip()
-    
-    # Lista de sufixos plurais comuns em português
-    sufixos_plurais = ['s', 'es', 'ões', 'ães', 'ais', 'eis', 'óis', 'uis']
-    
-    # Palavras irregulares (singular -> plural)
-    irregulares = {
-        'males': 'mal', 'cômodos': 'cômodo', 'cômodas': 'cômoda',
-        'país': 'país', 'lápis': 'lápis'  # palavras que não mudam no plural
-    }
-    
-    if palavra in irregulares:
-        return irregulares[palavra]
-    
-    # Remove sufixos plurais
-    for sufixo in sufixos_plurais:
-        if palavra.endswith(sufixo) and len(palavra) > len(sufixo):
-            palavra_singular = palavra[:-len(sufixo)]
-            # Verifica se a palavra singular faz sentido
-            if len(palavra_singular) >= 2:  # Evita palavras muito curtas
-                return palavra_singular
-    
-    return palavra
-
-def produtos_reconhecidos(texto):
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, descricao FROM produtos")
-    produtos = cursor.fetchall()
-    conn.close()
-
-    texto_lower = texto.lower()
-    resultado = []
-
-    for pid, desc in produtos:
-        desc_lower = desc.lower()
-        
-        # Divide a descrição em palavras
-        palavras_desc = desc_lower.split()
-        palavras_texto = texto_lower.split()
-        
-        # Normaliza todas as palavras (remove plurais)
-        palavras_desc_normalizadas = [normalizar_palavra(p) for p in palavras_desc]
-        palavras_texto_normalizadas = [normalizar_palavra(p) for p in palavras_texto]
-        
-        # Verifica se todas as palavras da descrição estão no texto (considerando plurais)
-        match = all(
-            any(palavra_desc == palavra_texto 
-                for palavra_texto in palavras_texto_normalizadas)
-            for palavra_desc in palavras_desc_normalizadas
-        )
-        
-        if match:
-            # Tenta extrair quantidade usando regex mais flexível
-            # Procura por padrões como "2 panelas", "3 unidades de panela", etc.
-            padroes_quantidade = [
-                r"(\d+)\s+" + re.escape(palavras_desc[0]),
-                r"(\d+)\s+unidades?\s+(?:de\s+)?" + re.escape(desc_lower),
-                r"quantidade[:\s]*(\d+).*?" + re.escape(desc_lower),
-                r"pedir\s+(\d+).*?" + re.escape(desc_lower)
-            ]
+            return True
             
-            quantidade = 1
-            for padrao in padroes_quantidade:
-                quantidade_match = re.search(padrao, texto_lower, re.IGNORECASE)
-                if quantidade_match:
+        except Exception as e:
+            conn.rollback()
+            config.logger.error(f"❌ Erro ao atualizar produtos: {e}")
+            return False
+        finally:
+            conn.close()
+
+# ==============================
+# SISTEMA DE CONTROLE DE ESTADO
+# ==============================
+class StateManager:
+    def __init__(self, db_manager):
+        self.db = db_manager
+    
+    def is_email_processed(self, email_id):
+        """Verifica se email já foi processado"""
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM emails_processados WHERE id_email = ?", (email_id,))
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+    
+    def mark_email_processed(self, email_id, remetente, assunto):
+        """Marca email como processado"""
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO emails_processados (id_email, data_processamento, remetente, assunto) VALUES (?, ?, ?, ?)",
+                (email_id, datetime.now().isoformat(), remetente, assunto)
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            config.logger.error(f"❌ Erro ao marcar email como processado: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+    
+    def get_last_processed_email(self):
+        """Obtém último email processado para recovery"""
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id_email FROM emails_processados ORDER BY id DESC LIMIT 1")
+            result = cursor.fetchone()
+            return result[0] if result else None
+        finally:
+            conn.close()
+
+# ==============================
+# AGENTE ORQUESTRADOR ROBUSTO
+# ==============================
+class EmailOrchestrator:
+    def __init__(self, db_manager, state_manager):
+        self.db = db_manager
+        self.state = state_manager
+    
+    def classify_intention(self, corpo_email, assunto):
+        """Classificação robusta de intenção"""
+        corpo_lower = corpo_email.lower()
+        assunto_lower = assunto.lower()
+        
+        # Palavras-chave para classificação rápida
+        keywords = {
+            'reclamacao': ['reclamação', 'reclamacao', 'problema', 'erro', 'faltando', 'quebrado', 'defeito'],
+            'negociacao': ['proposta', 'oferta', 'negociar', 'desconto', 'melhor preço', 'contraproposta'],
+            'duvida': ['dúvida', 'duvida', 'pergunta', 'como funciona', 'prazo', 'entrega'],
+            'pedido': ['orçamento', 'pedido', 'solicitar', 'comprar', 'cotação', 'preço']
+        }
+        
+        for intent, palavras in keywords.items():
+            if any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras):
+                return intent
+        
+        # Fallback para Ollama
+        return self.classify_with_ollama(corpo_email, assunto)
+    
+    def classify_with_ollama(self, corpo_email, assunto):
+        """Classificação com Ollama e tratamento de erro"""
+        prompt = f"""
+        Classifique a intenção em: pedido, duvida, reclamacao, negociacao.
+        Assunto: {assunto}
+        Corpo: {corpo_email[:300]}
+        Responda APENAS com uma palavra.
+        """
+        
+        try:
+            resposta = chat(
+                model="llama3",
+                messages=[
+                    {"role": "system", "content": "Classifique intenções de email."},
+                    {"role": "user", "content": prompt}
+                ],
+                options={'timeout': 30}
+            )
+            return resposta["message"]["content"].strip().lower()
+        except Exception as e:
+            config.logger.warning(f"⚠️ Ollama não disponível, usando fallback: {e}")
+            return "pedido"  # Fallback conservador
+
+# ==============================
+# SISTEMA DE EMAIL ROBUSTO
+# ==============================
+class EmailManager:
+    def __init__(self, gmail_service):
+        self.service = gmail_service
+        self.last_sent = {}
+    
+    def get_unprocessed_emails(self, max_results=10):
+        """Obtém emails não processados de forma robusta"""
+        try:
+            result = self.service.users().messages().list(
+                userId='me',
+                labelIds=['INBOX'],
+                maxResults=max_results
+            ).execute()
+            
+            messages = result.get('messages', [])
+            unprocessed = []
+            
+            for msg in messages:
+                msg_id = msg['id']
+                if not state_manager.is_email_processed(msg_id):
                     try:
-                        quantidade = int(quantidade_match.group(1))
-                        break
-                    except ValueError:
+                        email_data = self.extract_email_data(msg_id)
+                        if email_data:
+                            unprocessed.append(email_data)
+                    except Exception as e:
+                        config.logger.error(f"❌ Erro ao extrair email {msg_id}: {e}")
                         continue
             
-            resultado.append({
-                "id": pid, 
-                "descricao": desc, 
-                "quantidade": quantidade,
-                "match_exato": desc_lower in texto_lower
-            })
-    
-    return resultado
-
-# ==============================
-# ENVIAR EMAIL
-# ==============================
-def enviar_email(service, destinatario, assunto, mensagem):
-    global ultimos_emails
-    agora = datetime.now()
-    if destinatario in ultimos_emails and agora - ultimos_emails[destinatario] < COOLDOWN:
-        print(f"⏳ Email não enviado para {destinatario}, ainda no cooldown.")
-        return
-
-    mime_message = MIMEText(mensagem)
-    mime_message['to'] = destinatario
-    mime_message['subject'] = assunto
-    raw = base64.urlsafe_b64encode(mime_message.as_bytes()).decode()
-
-    try:
-        service.users().messages().send(userId="me", body={"raw": raw}).execute()
-        ultimos_emails[destinatario] = agora
-        # Registrar log com tipo de agente detectado pelo assunto
-        tipo_agente = "negociador" if "orçamento" in assunto.lower() else "duvidas" if "dúvida" in assunto.lower() else "reclamacao" if "reclamação" in assunto.lower() else "geral"
-        registrar_log(destinatario, mensagem, tipo_agente)
-        print(f"📤 Email enviado para {destinatario}")
-    except HttpError as error:
-        print(f"⚠️ Erro ao enviar email: {error}")
-
-# ==============================
-# LER NOVO EMAIL
-# ==============================
-def obter_ultimo_email(service):
-    try:
-        resultados = service.users().messages().list(userId='me', labelIds=['INBOX'], maxResults=1).execute()
-        mensagens = resultados.get('messages', [])
-        if not mensagens:
-            return None
-        mensagem_id = mensagens[0]['id']
-        mensagem = service.users().messages().get(userId='me', id=mensagem_id, format='full').execute()
-        headers = mensagem['payload']['headers']
-
-        remetente = assunto = "(desconhecido)"
-        corpo = ""
-        
-        # Extrair email do remetente
-        for header in headers:
-            if header['name'] == 'From':
-                remetente = header['value']
-                # Extrair apenas o email se vier no formato "Nome <email@dominio.com>"
-                match = re.search(r'<(.+?)>', remetente)
-                if match:
-                    remetente = match.group(1)
-                else:
-                    remetente = remetente.split()[-1] if ' ' in remetente else remetente
-            elif header['name'] == 'Subject':
-                assunto = header['value']
-
-        # Extrair corpo do email
-        if "parts" in mensagem["payload"]:
-            for part in mensagem["payload"]["parts"]:
-                if part["mimeType"] == "text/plain" and "data" in part["body"]:
-                    corpo = base64.urlsafe_b64decode(part["body"]["data"]).decode('utf-8')
-                    break
-        else:
-            if "data" in mensagem["payload"]["body"]:
-                corpo = base64.urlsafe_b64decode(mensagem["payload"]["body"]["data"]).decode('utf-8')
-
-        return mensagem_id, remetente, assunto, corpo
-    except Exception as e:
-        print(f"⚠️ Erro ao obter email: {e}")
-        return None
-
-# ==============================
-# PROCESSAR PEDIDO
-# ==============================
-def registrar_pedido(email, produtos_pedido):
-    conn = sqlite3.connect(DB_CLIENTES)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM clientes WHERE email = ?", (email,))
-    cliente = cursor.fetchone()
-    id_cliente = cliente[0] if cliente else None
-
-    data_atual = datetime.now().isoformat()
-    cursor.execute("INSERT INTO pedidos (id_cliente, data) VALUES (?, ?)", (id_cliente, data_atual))
-    id_pedido = cursor.lastrowid
-
-    for p in produtos_pedido:
-        cursor.execute(
-            "INSERT INTO pedidos_produtos (id_pedido, id_produto, quantidade) VALUES (?, ?, ?)",
-            (id_pedido, p["id"], p["quantidade"])
-        )
-    conn.commit()
-    conn.close()
-
-# ==============================
-# MONITORAMENTO PRINCIPAL
-# ==============================
-def monitorar_emails():
-    print("🔄 Monitorando novos e-mails...\n")
-    service = autenticar_gmail()
-    ultimo_id = None
-    inicializar_banco()
-    atualizar_produtos()
-
-    while True:
-        try:
-            resultado = obter_ultimo_email(service)
-            if resultado:
-                mensagem_id, remetente, assunto, corpo = resultado
-                if mensagem_id != ultimo_id:
-                    print(f"\n📬 Novo e-mail recebido!")
-                    print(f"De: {remetente}")
-                    print(f"Assunto: {assunto}")
-                    print(f"Corpo: {corpo[:200]}...")
-
-                    # Classificar intenção do email
-                    intencao = classificar_intencao_email(corpo, assunto)
-                    print(f"🎯 Intenção detectada: {intencao}")
-
-                    # Verificar se é resposta com contraproposta
-                    contra_proposta = detectar_contra_proposta(corpo)
-                    if contra_proposta:
-                        print("💼 Contraproposta detectada!")
-
-                    produtos_pedido = produtos_reconhecidos(corpo)
-                    
-                    if produtos_pedido:
-                        print("🛒 Produtos reconhecidos no pedido:")
-                        for p in produtos_pedido:
-                            status_match = "✅" if p["match_exato"] else "🔍"
-                            print(f" {status_match} ID {p['id']}: {p['descricao']} x{p['quantidade']}")
-
-                    # Direcionar para o agente correto
-                    if intencao == "pedido" and produtos_pedido and not contra_proposta:
-                        print("\n💰 Agente Negociador ativado...")
-                        orcamento = calcular_orcamento(produtos_pedido)
-                        
-                        print(f"📊 RESUMO DO ORÇAMENTO:")
-                        print(f"   Total de unidades: {orcamento['total_unidades']}")
-                        print(f"   Subtotal: R${orcamento['subtotal']:.2f}")
-                        print(f"   Total final: R${orcamento['total_final']:.2f}")
-                        
-                        if not cliente_existe(remetente):
-                            cadastrar_cliente(remetente)
-                            cliente_novo = True
-                        else:
-                            cliente_novo = False
-                        
-                        resposta = gerar_resposta_negociador(orcamento, cliente_novo, False)
-                        assunto_email = f"Orçamento - Pedido {mensagem_id[:8]}"
-                        
-                    elif intencao == "duvida":
-                        print("\n❓ Agente de Dúvidas ativado...")
-                        resposta = gerar_resposta_duvidas(corpo, not cliente_existe(remetente))
-                        assunto_email = "Resposta à sua dúvida"
-                        
-                    elif intencao == "reclamacao":
-                        print("\n🚨 Agente de Reclamações ativado...")
-                        resposta = gerar_resposta_reclamacao(corpo)
-                        assunto_email = "Registro da sua reclamação"
-                        
-                    elif contra_proposta:
-                        print("\n💼 Encaminhando para negociador humano...")
-                        resposta = gerar_resposta_negociador(None, True, True)
-                        assunto_email = "Sua contraproposta - Encaminhamento"
-                        
-                    else:
-                        print("\n🤖 Agente Geral ativado...")
-                        resposta = gerar_resposta_ollama(corpo, not cliente_existe(remetente))
-                        assunto_email = "Agradecimento pelo contato"
-
-                    enviar_email(service, remetente, assunto_email, resposta)
-
-                    if produtos_pedido and intencao == "pedido" and not contra_proposta:
-                        registrar_pedido(remetente, produtos_pedido)
-                        print("📦 Pedido registrado no banco de dados.")
-
-                    ultimo_id = mensagem_id
-                    
-            # Verificar se usuário quer acessar interface de correções
-            time.sleep(2)  # Pequena pausa para não sobrecarregar
-            if False:  # Modificar para True quando quiser testar a interface
-                exibir_interface_correcoes()
-                
-            time.sleep(8)  # Intervalo total de 10 segundos
-                
-        except KeyboardInterrupt:
-            print("\n🛑 Monitoramento encerrado pelo usuário.")
-            break
+            return unprocessed
+            
         except Exception as e:
-            print(f"⚠️ Erro: {e}")
-            time.sleep(10)
+            config.logger.error(f"❌ Erro ao listar emails: {e}")
+            return []
+    
+    def extract_email_data(self, message_id):
+        """Extrai dados do email com tratamento robusto"""
+        try:
+            message = self.service.users().messages().get(
+                userId='me', 
+                id=message_id, 
+                format='full'
+            ).execute()
+            
+            headers = message['payload']['headers']
+            remetente = assunto = "desconhecido"
+            corpo = ""
+            
+            for header in headers:
+                if header['name'] == 'From':
+                    remetente = self.extract_email_from_header(header['value'])
+                elif header['name'] == 'Subject':
+                    assunto = header['value'] or "Sem assunto"
+            
+            # Extrair corpo
+            corpo = self.extract_body(message['payload'])
+            
+            return {
+                'id': message_id,
+                'remetente': remetente,
+                'assunto': assunto,
+                'corpo': corpo
+            }
+            
+        except Exception as e:
+            config.logger.error(f"❌ Erro ao processar email {message_id}: {e}")
+            return None
+    
+    def extract_email_from_header(self, from_header):
+        """Extrai email do header de forma robusta"""
+        try:
+            match = re.search(r'<(.+?)>', from_header)
+            if match:
+                return match.group(1)
+            else:
+                # Última parte que parece email
+                parts = from_header.split()
+                for part in reversed(parts):
+                    if '@' in part:
+                        return part
+                return from_header
+        except:
+            return from_header
+    
+    def extract_body(self, payload):
+        """Extrai corpo do email de forma robusta"""
+        try:
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    if part['mimeType'] == 'text/plain' and 'data' in part.get('body', {}):
+                        return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+            elif 'data' in payload.get('body', {}):
+                return base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
+            
+            return "Corpo não disponível"
+        except Exception as e:
+            config.logger.warning(f"⚠️ Erro ao extrair corpo: {e}")
+            return "Erro ao ler corpo do email"
+    
+    def send_email(self, destinatario, assunto, mensagem):
+        """Envia email com controle de rate limiting"""
+        # Rate limiting
+        now = datetime.now()
+        if destinatario in self.last_sent:
+            if now - self.last_sent[destinatario] < config.COOLDOWN:
+                config.logger.warning(f"⏳ Rate limit para {destinatario}")
+                return False
+        
+        try:
+            mime_message = MIMEText(mensagem, 'plain', 'utf-8')
+            mime_message['to'] = destinatario
+            mime_message['subject'] = assunto
+            
+            raw = base64.urlsafe_b64encode(mime_message.as_bytes()).decode()
+            
+            self.service.users().messages().send(
+                userId='me', 
+                body={'raw': raw}
+            ).execute()
+            
+            self.last_sent[destinatario] = now
+            config.logger.info(f"📤 Email enviado para {destinatario}")
+            return True
+            
+        except Exception as e:
+            config.logger.error(f"❌ Erro ao enviar email para {destinatario}: {e}")
+            return False
 
 # ==============================
-# EXECUÇÃO
+# SISTEMA PRINCIPAL
 # ==============================
+class EmailAgentSystem:
+    def __init__(self):
+        self.db = DatabaseManager(config.DB_CLIENTES)
+        self.state = StateManager(self.db)
+        self.products = ProductManager(self.db)
+        self.orchestrator = EmailOrchestrator(self.db, self.state)
+        self.gmail_auth = GmailAuthenticator()
+        self.email_manager = None
+    
+    def initialize(self):
+        """Inicialização robusta do sistema"""
+        config.logger.info("🚀 Inicializando Email Agent Market...")
+        
+        if not config.validate_environment():
+            return False
+        
+        if not self.products.update_products():
+            config.logger.error("❌ Falha ao carregar produtos")
+            return False
+        
+        service = self.gmail_auth.authenticate()
+        if not service:
+            config.logger.error("❌ Falha na autenticação Gmail")
+            return False
+        
+        self.email_manager = EmailManager(service)
+        config.logger.info("✅ Sistema inicializado com sucesso")
+        return True
+    
+    def process_single_email(self, email_data):
+        """Processa um único email de forma robusta"""
+        try:
+            config.logger.info(f"📧 Processando: {email_data['remetente']} - {email_data['assunto'][:50]}...")
+            
+            intencao = self.orchestrator.classify_intention(
+                email_data['corpo'], 
+                email_data['assunto']
+            )
+            
+            config.logger.info(f"🎯 Intenção: {intencao}")
+            
+            # TODO: Implementar lógica dos agentes específicos
+            resposta = f"Resposta automática para {intencao}. Email processado com sucesso."
+            
+            # Enviar resposta
+            if self.email_manager.send_email(email_data['remetente'], "Confirmação", resposta):
+                self.state.mark_email_processed(
+                    email_data['id'],
+                    email_data['remetente'],
+                    email_data['assunto']
+                )
+                return True
+            
+            return False
+            
+        except Exception as e:
+            config.logger.error(f"❌ Erro ao processar email: {e}")
+            return False
+    
+    def run_monitoring_loop(self):
+        """Loop principal de monitoramento robusto"""
+        config.logger.info("🔍 Iniciando monitoramento de emails...")
+        
+        last_email = self.state.get_last_processed_email()
+        if last_email:
+            config.logger.info(f"📧 Recovery: último email processado {last_email[:20]}...")
+        
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
+        while True:
+            try:
+                emails = self.email_manager.get_unprocessed_emails(config.MAX_EMAILS_PROCESS)
+                
+                if emails:
+                    config.logger.info(f"📨 {len(emails)} email(s) não processado(s)")
+                    
+                    success_count = 0
+                    for email in emails:
+                        if self.process_single_email(email):
+                            success_count += 1
+                    
+                    config.logger.info(f"✅ {success_count}/{len(emails)} emails processados")
+                    consecutive_errors = 0  # Reset error counter
+                else:
+                    config.logger.info("⏳ Nenhum email novo")
+                
+                # Aguardar próximo ciclo
+                time.sleep(config.CHECK_INTERVAL)
+                
+            except KeyboardInterrupt:
+                config.logger.info("🛑 Interrompido pelo usuário")
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                config.logger.error(f"❌ Erro no loop principal ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    config.logger.error("🚨 Muitos erros consecutivos, encerrando...")
+                    break
+                
+                time.sleep(config.CHECK_INTERVAL * 2)  # Backoff em caso de erro
+
+# ==============================
+# EXECUÇÃO PRINCIPAL
+# ==============================
+def main():
+    """Função principal com tratamento completo de erro"""
+    config.logger.info("=" * 50)
+    config.logger.info("EMAIL AGENT MARKET - MVP ROBUSTO")
+    config.logger.info("=" * 50)
+    
+    system = EmailAgentSystem()
+    
+    try:
+        if system.initialize():
+            system.run_monitoring_loop()
+        else:
+            config.logger.error("❌ Falha na inicialização do sistema")
+            sys.exit(1)
+            
+    except Exception as e:
+        config.logger.critical(f"💥 ERRO CRÍTICO: {e}")
+        sys.exit(1)
+    finally:
+        config.logger.info("👋 Sistema encerrado")
+
 if __name__ == "__main__":
-    monitorar_emails()
+    main()
