@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-EMAIL AGENT MARKET - MVP ROBUSTO
-Versão corrigida para execução em qualquer sistema operacional
+EMAIL AGENT MARKET - MVP COM RAG
+Versão com RAG para respostas precisas baseadas nos dados da empresa
 """
 
 import os
@@ -17,694 +17,684 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
-# Verificar dependências críticas
-try:
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-    from googleapiclient.errors import HttpError
-    from google.auth.transport.requests import Request
-except ImportError as e:
-    print(f"❌ ERRO CRÍTICO: Biblioteca Google não encontrada: {e}")
-    print("💡 Execute: pip install google-api-python-client google-auth-oauthlib")
-    sys.exit(1)
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 
-try:
-    from ollama import chat
-except ImportError as e:
-    print(f"❌ ERRO CRÍTICO: Ollama não encontrado: {e}")
-    print("💡 Execute: pip install ollama")
-    sys.exit(1)
+from ollama import chat
 
 # ==============================
-# CONFIGURAÇÃO ROBUSTA
+# CONFIGURAÇÕES
 # ==============================
 class Config:
+    """Classe de configuração centralizado do sistema
+       Contém todos os paths, intervalos e os parâmetros do sistema
+
+       Atributos são:
+            BASE_DIR (Path): É o diretório base do sistema
+            SCOPES (list): Permissões da API do GMAIL
+            CHECK_INTERVAL (int): Intervalo entre verificações em segundos (60 * 5 = 300 segundos)
+            COOLDOWN (timedelta): Intervalo mínimo entre emails para o mesmo destinatário
+
+    """
     def __init__(self):
+
+        # Inicialização das configurações com seus respectivos valores padrões
         self.BASE_DIR = Path(__file__).parent.absolute()
         self.ensure_directories()
         
+        # Configurações da API do GMAIL
         self.SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
         self.TOKEN_FILE = self.BASE_DIR / "token.json"
         self.CLIENT_SECRET_FILE = self.BASE_DIR / "credentials.json"
         self.DB_CLIENTES = self.BASE_DIR / "clientes.db"
-        self.ARQ_PRODUTOS = self.BASE_DIR / "produtos.txt"
-        self.LOG_FILE = self.BASE_DIR / "email_agent.log"
         
-        self.COOLDOWN = timedelta(minutes=10)
-        self.MAX_EMAILS_PROCESS = 10
-        self.CHECK_INTERVAL = 30  # segundos
+        # ARQUIVOS RAG - A base de conhecimento da empresa
+        self.ARQ_PRODUTOS = self.BASE_DIR / "produtos.txt"      # Informações dos produtos
+        self.ARQ_POLITICAS = self.BASE_DIR / "politicas.txt"    # Informações políticas
+        self.ARQ_FINANCEIRO = self.BASE_DIR / "financeiro.txt"  # Informações da parte financeira
+        self.ARQ_ENTREGAS = self.BASE_DIR / "entregas.txt"      # Informações relacionadas a entregas
         
-        # Configurar logging
+        # CONFIGURAÇÕES DE OPERAÇÕES
+        self.LOG_FILE = self.BASE_DIR / "email_agent.log" # Geração do arquivo de logs
+        
+        self.COOLDOWN = timedelta(minutes=10)   # Evitar spam para o mesmo cliente
+        self.CHECK_INTERVAL = 300               # Intervalo entre as checagens de novos emails
+        self.MAX_EMAILS_PROCESS = 10            # Máximo de emails checados por ciclo
+        
         self.setup_logging()
     
     def ensure_directories(self):
-        """Garante que todos os diretórios necessários existam"""
+
+        # Garantia que o diretório base existe
         self.BASE_DIR.mkdir(exist_ok=True)
     
     def setup_logging(self):
-        """Configura sistema de logging robusto"""
+
+        # Configurações do sistema de logs para o monitoramento
+        # Os logs sao exibidos no console em tempo real para debugging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(self.LOG_FILE, encoding='utf-8'),
-                logging.StreamHandler(sys.stdout)
-            ]
+            handlers=[logging.StreamHandler(sys.stdout)]
         )
         self.logger = logging.getLogger(__name__)
     
     def validate_environment(self):
-        """Valida se o ambiente está pronto para execução"""
-        errors = []
+
+        """ Válida se o ambiente está pronto para execução
+            Return:
+                    bool: True se todos os arquivos essencias existem, False caso contrário
+        """
+
+        # Verifica apenas arquivos essenciais
+        essential_files = [self.CLIENT_SECRET_FILE]
+        missing = [f for f in essential_files if not f.exists()]
         
-        # Verificar arquivos necessários
-        if not self.CLIENT_SECRET_FILE.exists():
-            errors.append(f"Arquivo {self.CLIENT_SECRET_FILE} não encontrado")
-        
-        if not self.ARQ_PRODUTOS.exists():
-            errors.append(f"Arquivo {self.ARQ_PRODUTOS} não encontrado")
-        
-        # Verificar permissões
-        if not os.access(self.BASE_DIR, os.W_OK):
-            errors.append(f"Sem permissão de escrita em {self.BASE_DIR}")
-        
-        if errors:
-            self.logger.error("❌ ERROS DE AMBIENTE:")
-            for error in errors:
-                self.logger.error(f"   - {error}")
+        if missing:
+            self.logger.error("❌ Arquivos essenciais faltando:")
+            for f in missing:
+                self.logger.error(f"   - {f.name}")
             return False
         
-        self.logger.info("✅ Ambiente validado com sucesso")
+        self.logger.info("✅ Ambiente validado")
         return True
 
-# Configuração global
+# Instância global de configuração
 config = Config()
 
 # ==============================
-# BANCO DE DADOS ROBUSTO
+# GERENCIADOR RAG (RETRIEVAL-AUGMENTED GENERATION)
+# ==============================
+class RAGManager:
+
+    """
+    
+    Sistema RAG para fornecer contexto preciso ao Ollama
+    Os arquivos de conhecimento da empresa são carregados
+    as informações relevantes baseado nas intenções detctadas no email.
+
+    Atributos são: 
+        context_cache (dict): Cache com conteúdo de todos os arquivos carregados
+
+    """
+
+    def __init__(self):
+
+        # Inicializa o RAGManager para carregar todos os contextos
+        self.context_cache = {}
+        self.load_all_contexts()
+    
+    def load_all_contexts(self):
+        """ 
+        
+        Carrega todos os arquivos de contexto uma vez na inicialização
+        Os arquivos são mantidos em cache para performance
+        Arquivos ausentes são tratados silenciosamente
+        
+        """
+        contexts = {
+            'produtos': self.load_file(config.ARQ_PRODUTOS),
+            'politicas': self.load_file(config.ARQ_POLITICAS),
+            'financeiro': self.load_file(config.ARQ_FINANCEIRO),
+            'entregas': self.load_file(config.ARQ_ENTREGAS)
+        }
+        self.context_cache = contexts
+        config.logger.info("✅ Contextos RAG carregados")
+    
+    def load_file(self, file_path):
+
+        """
+
+        Verifica se o arquivo existe e carrega o conteúdo do arquivo
+        
+        Args:
+            file_path (Path): Caminho do arquivo a ser carregado
+
+        Returns:
+            str: Conteúdo do arquivo ou string vazia caso não exista
+        
+        """
+        if file_path.exists():
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except Exception as e:
+                config.logger.error(f"❌ Erro ao carregar {file_path.name}: {e}")
+        return ""
+    
+
+    def get_relevant_context(self, email_corpo, intencoes):
+        
+        """
+        
+        Seleciona o contexto relevante com base nas intenções detectadas
+        
+        Args:
+            email_corpo (str): Corpo do emails recebido
+            intencoes (list): Lista das intenções detectadas
+
+        Returns:
+            str: Contexto relevante concatenado ou string vazia
+        """
+        contexto_relevante = []
+        corpo_lower = email_corpo.lower()
+        intencoes_str = [i['intencao'] for i in intencoes]
+        
+        # PRODUTOS - para pedidos, negociações
+        if any(i in intencoes_str for i in ['pedido', 'negociacao']):
+            if self.context_cache['produtos']:
+                contexto_relevante.append("🎯 CATÁLOGO DE PRODUTOS:\n" + self.context_cache['produtos'])
+        
+        # POLÍTICAS - para reclamações, trocas, dúvidas
+        if any(i in intencoes_str for i in ['reclamacao', 'duvida']):
+            if self.context_cache['politicas']:
+                contexto_relevante.append("📋 POLÍTICAS DA EMPRESA:\n" + self.context_cache['politicas'])
+        
+        # FINANCEIRO - para pagamentos, descontos
+        if any(i in intencoes_str for i in ['negociacao', 'duvida']) or any(word in corpo_lower for word in ['pagamento', 'desconto', 'preço', 'valor']):
+            if self.context_cache['financeiro']:
+                contexto_relevante.append("💰 INFORMAÇÕES FINANCEIRAS:\n" + self.context_cache['financeiro'])
+        
+        # ENTREGAS - para prazos, fretes
+        if any(i in intencoes_str for i in ['duvida', 'pedido']) or any(word in corpo_lower for word in ['entrega', 'prazo', 'frete', 'envio']):
+            if self.context_cache['entregas']:
+                contexto_relevante.append("🚚 INFORMAÇÕES DE ENTREGA:\n" + self.context_cache['entregas'])
+        
+        return "\n\n".join(contexto_relevante) if contexto_relevante else ""
+
+
+# ==============================
+# GERENCIADOR DE BANCO DE DADOS
 # ==============================
 class DatabaseManager:
+
+    """
+
+    Gerencia as operações de banco de dados SQLite
+
+    Responsável por manter o histórico de emails processados
+    para evitar duplicação de respostas
+
+    """
+
     def __init__(self, db_path):
+
+        """
+        Inicializa o gerenciador de banco de dados
+
+        Args:
+            db_path (str): Caminho do arquivo de banco de dados
+
+        """
         self.db_path = db_path
         self.ensure_tables()
     
     def get_connection(self):
-        """Retorna conexão com tratamento de erro"""
-        try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
-            return conn
-        except sqlite3.Error as e:
-            config.logger.error(f"❌ Erro de banco de dados: {e}")
-            raise
+
+        """
+
+        Cria e retorna uma conexão com o banco de dados
+
+        Returns:
+            sqlite.Connection: Conexão com o banco
+        """
+        return sqlite3.connect(self.db_path)
     
     def ensure_tables(self):
-        """Garante que todas as tabelas existam"""
-        tables = [
-            # Tabela clientes
-            '''
-            CREATE TABLE IF NOT EXISTS clientes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE NOT NULL,
-                nome TEXT,
-                data_cadastro TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            ''',
-            # Tabela produtos
-            '''
-            CREATE TABLE IF NOT EXISTS produtos (
-                id INTEGER PRIMARY KEY,
-                descricao TEXT NOT NULL,
-                preco_un REAL NOT NULL
-            )
-            ''',
-            # Tabela pedidos
-            '''
-            CREATE TABLE IF NOT EXISTS pedidos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_cliente INTEGER,
-                data TEXT NOT NULL,
-                status TEXT DEFAULT 'pendente',
-                id_email TEXT UNIQUE,
-                FOREIGN KEY (id_cliente) REFERENCES clientes (id) ON DELETE CASCADE
-            )
-            ''',
-            # Tabela pedidos_produtos
-            '''
-            CREATE TABLE IF NOT EXISTS pedidos_produtos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_pedido INTEGER,
-                id_produto INTEGER,
-                quantidade INTEGER,
-                corrigido BOOLEAN DEFAULT FALSE,
-                FOREIGN KEY (id_pedido) REFERENCES pedidos (id) ON DELETE CASCADE,
-                FOREIGN KEY (id_produto) REFERENCES produtos (id) ON DELETE CASCADE
-            )
-            ''',
-            # Tabela logs_envio
-            '''
-            CREATE TABLE IF NOT EXISTS logs_envio (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_cliente INTEGER,
-                email TEXT NOT NULL,
-                mensagem_enviada TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                tipo_agente TEXT NOT NULL,
-                FOREIGN KEY (id_cliente) REFERENCES clientes (id) ON DELETE SET NULL
-            )
-            ''',
-            # Tabela correcoes
-            '''
-            CREATE TABLE IF NOT EXISTS correcoes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_pedido INTEGER,
-                id_produto INTEGER,
-                quantidade_original INTEGER,
-                quantidade_corrigida INTEGER,
-                data_correcao TEXT NOT NULL,
-                FOREIGN KEY (id_pedido) REFERENCES pedidos (id) ON DELETE CASCADE,
-                FOREIGN KEY (id_produto) REFERENCES produtos (id) ON DELETE CASCADE
-            )
-            ''',
-            # Tabela emails_processados (CRÍTICA - controle de estado)
-            '''
-            CREATE TABLE IF NOT EXISTS emails_processados (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_email TEXT UNIQUE NOT NULL,
-                data_processamento TEXT NOT NULL,
-                remetente TEXT NOT NULL,
-                assunto TEXT NOT NULL
-            )
-            '''
-        ]
-        
+
+        """ 
+
+        Garante que as tabelas necessárias existam no banco
+
+        """
         conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            for table_sql in tables:
-                cursor.execute(table_sql)
-            conn.commit()
-            config.logger.info("✅ Tabelas do banco validadas")
-        except sqlite3.Error as e:
-            config.logger.error(f"❌ Erro ao criar tabelas: {e}")
-            raise
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+
+        # Tabela para controle de emails processados
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS emails_processados (
+                id_email TEXT PRIMARY KEY,
+                data_processamento TEXT,
+                remetente TEXT,
+                assunto TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        config.logger.info("✅ Banco de dados pronto")
 
 # ==============================
-# AUTENTICAÇÃO GMAIL ROBUSTA
-# ==============================
-class GmailAuthenticator:
-    def __init__(self):
-        self.service = None
-    
-    def authenticate(self):
-        """Autenticação robusta com fallbacks"""
-        creds = None
-        
-        # Tentar carregar token existente
-        if config.TOKEN_FILE.exists():
-            try:
-                creds = Credentials.from_authorized_user_file(str(config.TOKEN_FILE), config.SCOPES)
-                config.logger.info("✅ Token carregado do arquivo")
-            except Exception as e:
-                config.logger.warning(f"⚠️ Token inválido: {e}")
-                # Remover token corrompido
-                try:
-                    config.TOKEN_FILE.unlink()
-                    config.logger.info("🗑️ Token inválido removido")
-                except:
-                    pass
-        
-        # Se não tem credenciais válidas, fazer autenticação
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                    config.logger.info("✅ Token renovado")
-                except Exception as e:
-                    config.logger.warning(f"⚠️ Falha ao renovar token: {e}")
-                    creds = None
-            
-            if not creds:
-                if not config.CLIENT_SECRET_FILE.exists():
-                    config.logger.error(f"❌ Arquivo {config.CLIENT_SECRET_FILE} não encontrado")
-                    return None
-                
-                try:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        str(config.CLIENT_SECRET_FILE), config.SCOPES
-                    )
-                    creds = flow.run_local_server(port=8080, open_browser=True)
-                    
-                    # Salvar token para uso futuro
-                    with open(config.TOKEN_FILE, 'w', encoding='utf-8') as token:
-                        token.write(creds.to_json())
-                    config.logger.info("✅ Nova autenticação concluída")
-                    
-                except Exception as e:
-                    config.logger.error(f"❌ Erro na autenticação: {e}")
-                    return None
-        
-        try:
-            self.service = build('gmail', 'v1', credentials=creds)
-            # Testar conexão
-            self.service.users().getProfile(userId='me').execute()
-            config.logger.info("✅ Autenticação Gmail validada")
-            return self.service
-        except Exception as e:
-            config.logger.error(f"❌ Falha na conexão Gmail: {e}")
-            return None
-
-# ==============================
-# GESTÃO DE PRODUTOS
-# ==============================
-class ProductManager:
-    def __init__(self, db_manager):
-        self.db = db_manager
-    
-    def update_products(self):
-        """Atualiza produtos do arquivo com tratamento robusto"""
-        if not config.ARQ_PRODUTOS.exists():
-            config.logger.error(f"❌ Arquivo {config.ARQ_PRODUTOS} não encontrado")
-            return False
-        
-        try:
-            with open(config.ARQ_PRODUTOS, 'r', encoding='utf-8') as f:
-                linhas = f.readlines()
-        except Exception as e:
-            config.logger.error(f"❌ Erro ao ler arquivo de produtos: {e}")
-            return False
-        
-        produtos_novos = 0
-        conn = self.db.get_connection()
-        
-        try:
-            cursor = conn.cursor()
-            for num_linha, linha in enumerate(linhas, 1):
-                linha = linha.strip()
-                if linha.startswith("produto_id") or not linha:
-                    continue
-                
-                try:
-                    # Processamento robusto da linha
-                    parts = [p.strip().rstrip("),") for p in linha.split(",")]
-                    if len(parts) < 3:
-                        config.logger.warning(f"⚠️ Linha {num_linha} ignorada: formato inválido")
-                        continue
-                    
-                    produto_id = int(parts[0])
-                    descricao = parts[1]
-                    preco = float(parts[2])
-                    
-                    # Verificar se produto já existe
-                    cursor.execute("SELECT 1 FROM produtos WHERE id = ?", (produto_id,))
-                    if not cursor.fetchone():
-                        cursor.execute(
-                            "INSERT INTO produtos (id, descricao, preco_un) VALUES (?, ?, ?)",
-                            (produto_id, descricao, preco)
-                        )
-                        produtos_novos += 1
-                        config.logger.info(f"🆕 Produto adicionado: ID {produto_id} | {descricao}")
-                        
-                except (ValueError, IndexError) as e:
-                    config.logger.warning(f"⚠️ Erro na linha {num_linha} '{linha}': {e}")
-                    continue
-            
-            conn.commit()
-            
-            if produtos_novos == 0:
-                config.logger.info("✅ Nenhum produto novo para adicionar")
-            else:
-                config.logger.info(f"📊 Total de produtos novos: {produtos_novos}")
-                
-            return True
-            
-        except Exception as e:
-            conn.rollback()
-            config.logger.error(f"❌ Erro ao atualizar produtos: {e}")
-            return False
-        finally:
-            conn.close()
-
-# ==============================
-# SISTEMA DE CONTROLE DE ESTADO
+# GERENCIADOR DE ESTADO
 # ==============================
 class StateManager:
+
+    """
+
+    Gerencia o estado do sistema e controle de fluxo
+
+    Responsável por rastrear quais email já foram processados e evitar retrabalho
+    """
+
     def __init__(self, db_manager):
+
+        """
+
+        Inicializa o gerenciador de estado
+
+        Args: 
+            db.manager (DatabaseManager): Instância do gerenciador de banco
+        """
         self.db = db_manager
     
     def is_email_processed(self, email_id):
-        """Verifica se email já foi processado"""
+
+        """
+
+        Verifica se um email já foi processado
+
+        Args:
+            email_id (str): ID único do email no GMAIL
+
+        Returns:
+            bool: Truese o email já foi processado. False caso contrário
+        """
         conn = self.db.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM emails_processados WHERE id_email = ?", (email_id,))
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM emails_processados WHERE id_email = ?", (email_id,))
+        result = cursor.fetchone() is not None
+        conn.close()
+        return result
     
     def mark_email_processed(self, email_id, remetente, assunto):
-        """Marca email como processado"""
+
+        """
+
+        Marca o email como processado no banco de dados
+
+        Args: 
+            email_id (str): ID único do email
+            remetente (str): Email do remetente
+            assunto (str): Assunto do email
+        """
         conn = self.db.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR IGNORE INTO emails_processados (id_email, data_processamento, remetente, assunto) VALUES (?, ?, ?, ?)",
-                (email_id, datetime.now().isoformat(), remetente, assunto)
-            )
-            conn.commit()
-        except sqlite3.Error as e:
-            config.logger.error(f"❌ Erro ao marcar email como processado: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-    
-    def get_last_processed_email(self):
-        """Obtém último email processado para recovery"""
-        conn = self.db.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id_email FROM emails_processados ORDER BY id DESC LIMIT 1")
-            result = cursor.fetchone()
-            return result[0] if result else None
-        finally:
-            conn.close()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO emails_processados (id_email, data_processamento, remetente, assunto) VALUES (?, ?, ?, ?)",
+            (email_id, datetime.now().isoformat(), remetente, assunto)
+        )
+        conn.commit()
+        conn.close()
 
 # ==============================
-# AGENTE ORQUESTRADOR ROBUSTO
+# DETECÇÃO DE INTENÇÕES
 # ==============================
-class EmailOrchestrator:
-    def __init__(self, db_manager, state_manager):
+class IntentionDetector:
+
+    """
+
+    Detecta as intenções nos emails usando análisando as keywords
+
+    Idnetifica automaticamente o que o cliente precisa baseado em palavras-chave
+    no assunto e corpo do email
+    """
+    def __init__(self):
+
+        # Inicializa o detector com palavras-chave pré-definidas
+        self.keywords = {
+            'pedido': ['orçamento', 'pedido', 'comprar', 'cotação', 'preço', 'valor', 'quantidade'],
+            'duvida': ['dúvida', 'duvida', 'pergunta', 'como funciona', 'informação'],
+            'reclamacao': ['reclamação', 'reclamacao', 'problema', 'erro', 'defeito', 'quebrado', 'troc'],
+            'negociacao': ['proposta', 'negociar', 'desconto', 'melhor preço', 'condições']
+        }
+    
+    def detect_intentions(self, corpo_email, assunto):
+
+        """
+
+        Analisa o email e detecta intenções presentes
+
+        Args: 
+            corpo_email (str): Corpo do email
+            assunto (str): Assunto do email
+
+        Returns:
+            list: Lista do dicionŕio com intenções detectadas e a confiança
+        """
+        texto = f"{assunto} {corpo_email}".lower()
+        intentions = []
+        
+        for intent_name, words in self.keywords.items():
+            score = sum(1 for word in words if word in texto)
+            if score > 0:
+                intentions.append({
+                    'intencao': intent_name,
+                    'score': score,
+                    'confianca': min(score / 3.0, 1.0)
+                })
+        
+        # Fallback para emails sem intenções claras
+        return intentions if intentions else [{'intencao': 'geral', 'score': 1, 'confianca': 0.5}]
+
+# ==============================
+# AGENTE PRINCIPAL DE EMAIL COM RAG
+# ==============================
+class EmailAgent:
+
+    """
+
+    Agente principal que orquestra todo o processo de resposta a emails
+
+    Coordena a autenticação, detecção de intenções, geração de respostas 
+    e o envio de emails
+
+    """
+    def __init__(self, db_manager, state_manager, intention_detector, rag_manager):
+        
+        """
+
+        Inicializa o agente de emails com todas as depedências
+
+        Args:
+            db_manager (DatabaseManager): Gerenciador de banco
+            state_manager (StateManager): Gerenciador de estado
+            intention_detector (IntentionDetector): Detector de intenções
+            rag_manager (RAGManager): Gerenciador RAG
+
+        """
         self.db = db_manager
         self.state = state_manager
-    
-    def classify_intention(self, corpo_email, assunto):
-        """Classificação robusta de intenção"""
-        corpo_lower = corpo_email.lower()
-        assunto_lower = assunto.lower()
-        
-        # Palavras-chave para classificação rápida
-        keywords = {
-            'reclamacao': ['reclamação', 'reclamacao', 'problema', 'erro', 'faltando', 'quebrado', 'defeito'],
-            'negociacao': ['proposta', 'oferta', 'negociar', 'desconto', 'melhor preço', 'contraproposta'],
-            'duvida': ['dúvida', 'duvida', 'pergunta', 'como funciona', 'prazo', 'entrega'],
-            'pedido': ['orçamento', 'pedido', 'solicitar', 'comprar', 'cotação', 'preço']
-        }
-        
-        for intent, palavras in keywords.items():
-            if any(palavra in corpo_lower or palavra in assunto_lower for palavra in palavras):
-                return intent
-        
-        # Fallback para Ollama
-        return self.classify_with_ollama(corpo_email, assunto)
-    
-    def classify_with_ollama(self, corpo_email, assunto):
-        """Classificação com Ollama e tratamento de erro"""
-        prompt = f"""
-        Classifique a intenção em: pedido, duvida, reclamacao, negociacao.
-        Assunto: {assunto}
-        Corpo: {corpo_email[:300]}
-        Responda APENAS com uma palavra.
-        """
-        
-        try:
-            resposta = chat(
-                model="llama3",
-                messages=[
-                    {"role": "system", "content": "Classifique intenções de email."},
-                    {"role": "user", "content": prompt}
-                ],
-                options={'timeout': 30}
-            )
-            return resposta["message"]["content"].strip().lower()
-        except Exception as e:
-            config.logger.warning(f"⚠️ Ollama não disponível, usando fallback: {e}")
-            return "pedido"  # Fallback conservador
-
-# ==============================
-# SISTEMA DE EMAIL ROBUSTO
-# ==============================
-class EmailManager:
-    def __init__(self, gmail_service):
-        self.service = gmail_service
+        self.detector = intention_detector
+        self.rag = rag_manager
+        self.service = self.authenticate_gmail()
         self.last_sent = {}
     
-    def get_unprocessed_emails(self, max_results=10):
-        """Obtém emails não processados de forma robusta"""
+    def authenticate_gmail(self):
+
+        """
+
+        Autenticação da API do GMAIL
+
+        Returns:
+            googleapiclient.discovery.Resource: Serviço Gmail autenticado
+        
+        """
+        creds = None
+        
+        # Tenta carregar o token existente
+        if config.TOKEN_FILE.exists():
+            creds = Credentials.from_authorized_user_file(str(config.TOKEN_FILE), config.SCOPES)
+        
+
+        # Caso seja necessário, renova ou cria novas credenciais
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(str(config.CLIENT_SECRET_FILE), config.SCOPES)
+                creds = flow.run_local_server(port=8080)
+                with open(config.TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
+        
+        return build('gmail', 'v1', credentials=creds)
+    
+    def get_unprocessed_emails(self):
+
+        """
+
+        Busca emails não processados na caixa de entrada
+
+        Return:
+            list: Lista de dicionário com dados dos emails não processados
+        """
         try:
             result = self.service.users().messages().list(
-                userId='me',
-                labelIds=['INBOX'],
-                maxResults=max_results
+                userId='me', labelIds=['INBOX'], maxResults=config.MAX_EMAILS_PROCESS
             ).execute()
             
-            messages = result.get('messages', [])
             unprocessed = []
-            
-            for msg in messages:
-                msg_id = msg['id']
-                if not state_manager.is_email_processed(msg_id):
-                    try:
-                        email_data = self.extract_email_data(msg_id)
-                        if email_data:
-                            unprocessed.append(email_data)
-                    except Exception as e:
-                        config.logger.error(f"❌ Erro ao extrair email {msg_id}: {e}")
-                        continue
+            for msg in result.get('messages', []):
+                if not self.state.is_email_processed(msg['id']):
+                    email_data = self.extract_email_data(msg['id'])
+                    if email_data:
+                        unprocessed.append(email_data)
             
             return unprocessed
-            
         except Exception as e:
-            config.logger.error(f"❌ Erro ao listar emails: {e}")
+            config.logger.error(f"❌ Erro ao buscar emails: {e}")
             return []
     
     def extract_email_data(self, message_id):
-        """Extrai dados do email com tratamento robusto"""
+
+        """
+
+        Extrai dados relevantes de um email específico
+
+        Args:
+            message_id (str): ID do email no Gmail
+
+        Returns: 
+            dict: Dicionário com remetente, assunto e corpo ou None em caso de erro        
+        """
         try:
             message = self.service.users().messages().get(
-                userId='me', 
-                id=message_id, 
-                format='full'
+                userId='me', id=message_id, format='full'
             ).execute()
             
             headers = message['payload']['headers']
             remetente = assunto = "desconhecido"
-            corpo = ""
             
+            # Extração do remetente e assunto dos headers
             for header in headers:
                 if header['name'] == 'From':
-                    remetente = self.extract_email_from_header(header['value'])
+                    match = re.search(r'<(.+?)>', header['value'])
+                    remetente = match.group(1) if match else header['value'].split()[-1]
                 elif header['name'] == 'Subject':
                     assunto = header['value'] or "Sem assunto"
             
-            # Extrair corpo
-            corpo = self.extract_body(message['payload'])
+            # Extração do corpo do email
+            corpo = ""
+            if 'parts' in message['payload']:
+                for part in message['payload']['parts']:
+                    if part['mimeType'] == 'text/plain' and 'data' in part.get('body', {}):
+                        corpo = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+                        break
             
-            return {
-                'id': message_id,
-                'remetente': remetente,
-                'assunto': assunto,
-                'corpo': corpo
-            }
+            return {'id': message_id, 'remetente': remetente, 'assunto': assunto, 'corpo': corpo}
             
         except Exception as e:
-            config.logger.error(f"❌ Erro ao processar email {message_id}: {e}")
+            config.logger.error(f"❌ Erro ao extrair email: {e}")
             return None
     
-    def extract_email_from_header(self, from_header):
-        """Extrai email do header de forma robusta"""
+    def generate_response(self, email_data, intentions):
+        """
+
+        Gera respostas usando o Ollama como LLM e contexto de RAG
+
+        Args:
+            email_data (dict): Dados do email recebido
+            intentions(dict): Intenções detectadas
+
+        Returns:
+            str: Resposta gerada pelo Ollama
+
+        """
+        
+        # Obtém contexto relevante baseado nas intenções
+        contexto_rag = self.rag.get_relevant_context(email_data['corpo'], intentions)
+        
+        intencoes_str = ", ".join([i['intencao'] for i in intentions])
+        
+        prompt = f"""
+# CONTEXTO DA EMPRESA:
+{contexto_rag}
+
+# INTENÇÕES DETECTADAS NO EMAIL:
+{intencoes_str}
+
+# EMAIL DO CLIENTE:
+Assunto: {email_data['assunto']}
+Mensagem: {email_data['corpo']}
+
+# INSTRUÇÕES:
+- Use APENAS as informações do CONTEXTO DA EMPRESA para responder
+- Seja preciso, humano e direto
+- Não invente informações que não estão no contexto
+- Para pedidos, ofereça orçamento baseado nos produtos listados
+- Para reclamações, siga as políticas da empresa
+- Assine como "Equipe de Atendimento"
+
+RESPOSTA:
+"""
+        
         try:
-            match = re.search(r'<(.+?)>', from_header)
-            if match:
-                return match.group(1)
-            else:
-                # Última parte que parece email
-                parts = from_header.split()
-                for part in reversed(parts):
-                    if '@' in part:
-                        return part
-                return from_header
-        except:
-            return from_header
-    
-    def extract_body(self, payload):
-        """Extrai corpo do email de forma robusta"""
-        try:
-            if 'parts' in payload:
-                for part in payload['parts']:
-                    if part['mimeType'] == 'text/plain' and 'data' in part.get('body', {}):
-                        return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-            elif 'data' in payload.get('body', {}):
-                return base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
-            
-            return "Corpo não disponível"
+            resposta = chat(
+                model="llama3",
+                messages=[{"role": "user", "content": prompt}],
+                options={'timeout': 45}
+            )
+            return resposta["message"]["content"]
         except Exception as e:
-            config.logger.warning(f"⚠️ Erro ao extrair corpo: {e}")
-            return "Erro ao ler corpo do email"
+            config.logger.error(f"❌ Erro ao gerar resposta: {e}")
+            return "Obrigado pelo seu contato! Nossa equipe responderá em breve."
     
     def send_email(self, destinatario, assunto, mensagem):
-        """Envia email com controle de rate limiting"""
-        # Rate limiting
+
+        """
+
+        Enviar email com controle de rate limit
+
+        Args:
+            destinatario (str): Email do destinatário
+            assunto (str): Assunto do email
+            mensagem (str): Corpo da mensagem
+
+        Returns: 
+            bool: True se email foi enviado, False caso contrário
+        """
         now = datetime.now()
-        if destinatario in self.last_sent:
-            if now - self.last_sent[destinatario] < config.COOLDOWN:
-                config.logger.warning(f"⏳ Rate limit para {destinatario}")
-                return False
+
+        # Verifica rate limit
+        if destinatario in self.last_sent and (now - self.last_sent[destinatario]) < config.COOLDOWN:
+            config.logger.warning(f"⏳ Rate limit: {destinatario}")
+            return False
         
         try:
             mime_message = MIMEText(mensagem, 'plain', 'utf-8')
             mime_message['to'] = destinatario
-            mime_message['subject'] = assunto
-            
+            mime_message['subject'] = f"Re: {assunto}"
             raw = base64.urlsafe_b64encode(mime_message.as_bytes()).decode()
             
-            self.service.users().messages().send(
-                userId='me', 
-                body={'raw': raw}
-            ).execute()
-            
+            self.service.users().messages().send(userId='me', body={'raw': raw}).execute()
             self.last_sent[destinatario] = now
-            config.logger.info(f"📤 Email enviado para {destinatario}")
             return True
-            
         except Exception as e:
-            config.logger.error(f"❌ Erro ao enviar email para {destinatario}: {e}")
+            config.logger.error(f"❌ Erro no envio: {e}")
             return False
+    
+    def process_emails(self):
 
-# ==============================
-# SISTEMA PRINCIPAL
-# ==============================
-class EmailAgentSystem:
-    def __init__(self):
-        self.db = DatabaseManager(config.DB_CLIENTES)
-        self.state = StateManager(self.db)
-        self.products = ProductManager(self.db)
-        self.orchestrator = EmailOrchestrator(self.db, self.state)
-        self.gmail_auth = GmailAuthenticator()
-        self.email_manager = None
+        """
+
+        Processa todos os emails não processados
+
+        Return:
+            int: Número de emails processados com sucesso
+        """
+        emails = self.get_unprocessed_emails()
+        
+        if not emails:
+            config.logger.info("⏳ Nenhum email novo")
+            return 0
+        
+        config.logger.info(f"📨 {len(emails)} email(s) para processar")
+        processed = 0
+        
+        for email in emails:
+
+            # Detecta intenções e gera resposta
+            intentions = self.detector.detect_intentions(email['corpo'], email['assunto'])
+            config.logger.info(f"🎯 Intenções: {[i['intencao'] for i in intentions]}")
+            
+            resposta = self.generate_response(email, intentions)
+            
+            # Envia a resposta e marca como processado
+            if self.send_email(email['remetente'], email['assunto'], resposta):
+                self.state.mark_email_processed(email['id'], email['remetente'], email['assunto'])
+                processed += 1
+                config.logger.info(f"✅ Respondido: {email['remetente']}")
+        
+        return processed
     
-    def initialize(self):
-        """Inicialização robusta do sistema"""
-        config.logger.info("🚀 Inicializando Email Agent Market...")
+    def run(self):
+
+        """
+
+        Loop principal de exucução do agente
+
+        Executa as verificações periódicas até ser interrompido
+        """
+        config.logger.info("🚀 Email Agent com RAG iniciado")
+        config.logger.info(f"⏰ Verificando a cada {config.CHECK_INTERVAL/60} minutos")
         
-        if not config.validate_environment():
-            return False
-        
-        if not self.products.update_products():
-            config.logger.error("❌ Falha ao carregar produtos")
-            return False
-        
-        service = self.gmail_auth.authenticate()
-        if not service:
-            config.logger.error("❌ Falha na autenticação Gmail")
-            return False
-        
-        self.email_manager = EmailManager(service)
-        config.logger.info("✅ Sistema inicializado com sucesso")
-        return True
-    
-    def process_single_email(self, email_data):
-        """Processa um único email de forma robusta"""
-        try:
-            config.logger.info(f"📧 Processando: {email_data['remetente']} - {email_data['assunto'][:50]}...")
-            
-            intencao = self.orchestrator.classify_intention(
-                email_data['corpo'], 
-                email_data['assunto']
-            )
-            
-            config.logger.info(f"🎯 Intenção: {intencao}")
-            
-            # TODO: Implementar lógica dos agentes específicos
-            resposta = f"Resposta automática para {intencao}. Email processado com sucesso."
-            
-            # Enviar resposta
-            if self.email_manager.send_email(email_data['remetente'], "Confirmação", resposta):
-                self.state.mark_email_processed(
-                    email_data['id'],
-                    email_data['remetente'],
-                    email_data['assunto']
-                )
-                return True
-            
-            return False
-            
-        except Exception as e:
-            config.logger.error(f"❌ Erro ao processar email: {e}")
-            return False
-    
-    def run_monitoring_loop(self):
-        """Loop principal de monitoramento robusto"""
-        config.logger.info("🔍 Iniciando monitoramento de emails...")
-        
-        last_email = self.state.get_last_processed_email()
-        if last_email:
-            config.logger.info(f"📧 Recovery: último email processado {last_email[:20]}...")
-        
-        consecutive_errors = 0
-        max_consecutive_errors = 5
-        
+        ciclo = 0
         while True:
+            ciclo += 1
+            config.logger.info(f"\n🔄 Ciclo #{ciclo} - {datetime.now().strftime('%H:%M:%S')}")
+            
             try:
-                emails = self.email_manager.get_unprocessed_emails(config.MAX_EMAILS_PROCESS)
+                processed = self.process_emails()
+                if processed > 0:
+                    config.logger.info(f"📊 {processed} email(s) processado(s) neste ciclo")
                 
-                if emails:
-                    config.logger.info(f"📨 {len(emails)} email(s) não processado(s)")
-                    
-                    success_count = 0
-                    for email in emails:
-                        if self.process_single_email(email):
-                            success_count += 1
-                    
-                    config.logger.info(f"✅ {success_count}/{len(emails)} emails processados")
-                    consecutive_errors = 0  # Reset error counter
-                else:
-                    config.logger.info("⏳ Nenhum email novo")
-                
-                # Aguardar próximo ciclo
+                config.logger.info(f"⏰ Próxima verificação em {config.CHECK_INTERVAL/60} minutos...")
                 time.sleep(config.CHECK_INTERVAL)
                 
             except KeyboardInterrupt:
-                config.logger.info("🛑 Interrompido pelo usuário")
+                config.logger.info("👋 Encerrado pelo usuário")
                 break
             except Exception as e:
-                consecutive_errors += 1
-                config.logger.error(f"❌ Erro no loop principal ({consecutive_errors}/{max_consecutive_errors}): {e}")
-                
-                if consecutive_errors >= max_consecutive_errors:
-                    config.logger.error("🚨 Muitos erros consecutivos, encerrando...")
-                    break
-                
-                time.sleep(config.CHECK_INTERVAL * 2)  # Backoff em caso de erro
+                config.logger.error(f"❌ Erro no ciclo: {e}")
+                time.sleep(60)
 
 # ==============================
 # EXECUÇÃO PRINCIPAL
 # ==============================
 def main():
-    """Função principal com tratamento completo de erro"""
+
+    """
+
+    Função principal de inicialização do sistema
+
+    Orquestra a criação de todos os componentes e inicia o loop principal
+    """
     config.logger.info("=" * 50)
-    config.logger.info("EMAIL AGENT MARKET - MVP ROBUSTO")
+    config.logger.info("EMAIL AGENT MARKET - MVP COM RAG")
     config.logger.info("=" * 50)
     
-    system = EmailAgentSystem()
+    if not config.validate_environment():
+        return
     
-    try:
-        if system.initialize():
-            system.run_monitoring_loop()
-        else:
-            config.logger.error("❌ Falha na inicialização do sistema")
-            sys.exit(1)
-            
-    except Exception as e:
-        config.logger.critical(f"💥 ERRO CRÍTICO: {e}")
-        sys.exit(1)
-    finally:
-        config.logger.info("👋 Sistema encerrado")
+    # Inicializando componentes
+    db = DatabaseManager(config.DB_CLIENTES)
+    state = StateManager(db)
+    detector = IntentionDetector()
+    rag = RAGManager()
+    
+    # Cria e executa agente
+    agent = EmailAgent(db, state, detector, rag)
+    agent.run()
 
 if __name__ == "__main__":
+
+    """
+
+    Ponto de entrada do sistema
+
+    Garante que o sistema seja executado apenas quando o script é diretamente chamado,
+    não quando importado
+    """
     main()
