@@ -1,0 +1,21 @@
+CATÁLOGO DE PRODUTOS:
+
+PANELAS:
+- Panela Antiaderente 24cm: R$ 89,90 | Código: PAN24
+- Panela Antiaderente 28cm: R$ 119,90 | Código: PAN28  
+- Panela de Pressão 5L: R$ 149,90 | Código: PRES5
+- Jogo de Panelas (5 peças): R$ 399,90 | Código: JGP5
+
+TALHERES:
+- Talheres Inox 24 peças: R$ 129,90 | Código: TAL24
+- Talheres Inox 48 peças: R$ 229,90 | Código: TAL48
+
+UTENSÍLIOS:
+- Espátula de Silicone: R$ 24,90 | Código: ESP01
+- Conjunto de Potes Herméticos (10 peças): R$ 79,90 | Código: POT10
+- Faca de Chef Profissional: R$ 69,90 | Código: FAC01
+
+DESCONTOS:
+- Acima de R$ 500: 5% desconto
+- Acima de R$ 1000: 10% desconto
+- Pedidos corporativos: 15% desconto (acima de R$ 2000)
