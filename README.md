@@ -1,216 +1,220 @@
-# 📧 Email Agent Market - Sistema Automatizado de Resposta a Emails
+# 📧 Email Agent Market v2.0 - Sistema MLOps com A/B Testing para Atendimento Inteligente
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
-![IA](https://img.shields.io/badge/IA-RAG--Ollama-green)
+![MLOps](https://img.shields.io/badge/MLOps-A%2FB%20Testing-orange)
+![RAG](https://img.shields.io/badge/RAG-Contextual-green)
 ![Gmail](https://img.shields.io/badge/API-Gmail-red)
-![Status](https://img.shields.io/badge/Status-Production%20Ready-success)
+![Ollama](https://img.shields.io/badge/Ollama-Multiple%20Models-yellow)
 
 ## 📖 Sobre o Projeto
 
-### Para as pessoas menos técnicas 🤔
-Imagine um "atendente virtual inteligente" que lê e responde automaticamente os emails da sua empresa, 24 horas por dia, 7 dias por semana. Ele conhece todos os seus produtos, políticas e procedimentos e responde cada cliente de forma personalizada e precisa, como se fosse um funcionário humano altamente treinado além da sua alta disponibilidade.
+### Para as pessoas menos técnicas 
+Imagine um "atendente virtual inteligente" que **aprende e melhora com o tempo** - como um funcionário que fica mais experiente a cada dia! Ele lê e responde automaticamente os emails da sua empresa, 24/7, mas com um diferencial revolucionário: **ele testa diferentes formas de responder** para descobrir qual delas os clientes preferem, exatamente como fazemos com campanhas de marketing.
 
-### Detalhes Técnicos 🛠️
-Sistema de automação de emails baseado em **RAG (Retrieval-Augmented Generation)** que combina:
-- **API do Gmail** para monitoramento em tempo real
-- **Ollama com Llama3**, o LLM para geração de respostas inteligentes
-- **Base de conhecimento empresarial** para respostas precisas
-- **Detecção multi-intenção** para classificação automática
-- **Rate limiting inteligente** para evitar spam
+### Para profissionais técnicos 🛠️
+Sistema completo de automação de emails com **arquitetura MLOps**, combinando:
+- **RAG (Retrieval-Augmented Generation)** para respostas baseadas em conhecimento empresarial
+- **A/B Testing em produção** entre múltiplos modelos LLM (Llama3, Mistral, Neural-Chat)
+- **LLM-as-a-Judge** para avaliação automática da qualidade das respostas
+- **Dashboard em tempo real** com métricas de performance
+- **Log estruturado** para auditoria e análise histórica
 
-## 🎯 Objetivo do Projeto
+## 🚀 Principais Inovações da v2.0
 
-Transformar a produtividade da sua equipe através da automação inteligente de comunicação por email:
+### 🎲 **A/B Testing em Produção**
+- **Múltiplos Modelos**: Testa simultaneamente Llama3, Mistral, Neural-Chat e mais um modelo
+- **Seleção Ponderada**: Distribuição baseada em pesos configuráveis
+- **Métricas Comparativas**: Acompanhe qual modelo tem melhor performance
+- **Sem Interrupção**: Experimentos rodam em produção sem afetar usuários
 
-| Benefício | Impacto |
-|-----------|---------|
-| ⏱️ **Economia de Tempo** | Redução de pelo menos 50% no tempo gasto com emails rotineiros |
-| 📈 **Aumento de Eficiência** | Respostas instantâneas 24/7 sem intervenção humana |
-| ✨ **Melhoria na Qualidade** | Respostas consistentes e com poucos erros de digitação |
-| 🔄 **Redução de Erros** | Eliminação de inconsistências na comunicação |
-| 🎯 **Foco em Prioridades** | Equipe livre para demandas estratégicas |
-| 😊 **Satisfação Dupla** | Clientes e colaboradores mais felizes |
+### ⚖️ **LLM Juiz Automático**
+- **Avaliação Multi-Critério**: Clareza, precisão, empatia, profissionalismo
+- **Feedback Estruturado**: Cada resposta recebe nota detalhada (0-100)
+- **Log Completo em TXT**: Auditoria total de todas as avaliações
+- **Thread Safety**: Avaliações assíncronas sem bloquear respostas
 
-**Resultado Final:** Equipes mais produtivas, menos estressadas e clientes mais satisfeitos com atendimento rápido e preciso.
+### 📊 **Dashboard MLOPS em Tempo Real**
+```
+📈 Acesse: http://localhost:8081
+```
+- Estatísticas de uso por modelo
+- Distribuição real vs planejada do A/B Testing
+- Últimas avaliações com notas e feedback
+- Status completo do sistema
+- Log das avaliações para download
 
-## 🚀 Funcionalidades Principais
+### 💾 **Sistema de Persistência Robusto**
+- **Banco SQLite**: Histórico completo de respostas e avaliações
+- **Log TXT Acumulativo**: Todas as avaliações em arquivo legível
+- **Cache Inteligente**: Evita reprocessamento de emails
+- **Rate Limiting**: Controle de frequência por cliente
 
-### 🤖 Agentes Especializados
-- **Agente de Pedidos**: Orçamentos automáticos baseados no catálogo
-- **Agente de Dúvidas**: Respostas precisas sobre prazos, produtos, políticas
-- **Agente de Reclamações**: Processo automatizado para trocas e garantias
-- **Agente Financeiro**: Condições de pagamento e descontos
-- **Agente de Entregas**: Informações de prazos e fretes
+## 🎯 Objetivos do Projeto
 
-### 🧠 Inteligência Artificial
-- **Detecção Multi-Intenção**: Identifica automaticamente o que o cliente precisa
-- **RAG Contextual**: Respostas baseadas EXCLUSIVAMENTE nos dados da empresa
-- **Rate Limiting Inteligente**: Evita spam para o mesmo cliente
-- **Controle de Estado**: Nunca responde o mesmo email duas vezes
+| Benefício | Impacto na v2.0 |
+|-----------|-----------------|
+| 🔬 **Tomada de Decisão Baseada em Dados** | Métricas reais de performance dos LLMs |
+| ⚡ **Resiliência** | Fallback automático entre modelos |
+| 📊 **Visibilidade Total** | Dashboard completo com todas as métricas |
+| 🎯 **Otimização de Custos** | Identifica modelos mais eficientes |
 
-### 📊 Monitoramento
-- Verificação automática a cada **5 minutos**
-- Logs detalhados em tempo real
-- Histórico completo de interações
-- Estatísticas de performance
+## 🤖 Modelos Suportados
+
+### Modelos Pré-configurados
+| Modelo | Descrição | Peso Padrão |
+|--------|-----------|-------------|
+| `llama3` | Llama 3 Padrão | 1.0 |
+| `mistral` | Mistral 7B | 1.0 |
+| `llama3.1:8b` | Llama 3.1 8B | 1.0 |
+| `neural-chat` | Neural Chat 7B | 1.0 |
+
+### Detecção Automática
+- Verifica modelos instalados no Ollama
+- Fallback inteligente para variantes (ex: `llama3:latest`)
+- Log de disponibilidade na inicialização
 
 ## 📋 Requisitos
 
 ### Requisitos Mínimos
-- **Python 3.8** ou superior
-- **Conta Gmail** com acesso à API
-- **Ollama** instalado com modelo **Llama3**
-- **4GB RAM** mínima
-- **Conexão internet** estável
+- **Python 3.8+**
+- **Ollama** com modelos instalados
+- **Conta Gmail** com API habilitada
+- **4GB+ RAM** (recomendado 8GB para múltiplos modelos)
 
-### Arquivos de Configuração
-- `credentials.json` (Google API)
-- `produtos.txt` (Catálogo de produtos)
-- `politicas.txt` (Políticas da empresa)
-- `financeiro.txt` (Condições financeiras)
-- `entregas.txt` (Prazos e fretes)
+### Arquivos Necessários
+```
+credentials.json          # Credenciais Google API
+produtos.txt             # Catálogo de produtos
+politicas.txt            # Políticas da empresa
+financeiro.txt           # Condições financeiras
+entregas.txt            # Informações de entrega
+```
 
-## 🛠️ Instalação
+## 🛠️ Instalação Rápida
 
-### 1. Clone o Repositório
+### 1. Clone e Configure
 ```bash
 git clone https://github.com/seu-usuario/email-agent-market.git
 cd email-agent-market
+pip install -r requirements.txt
 ```
 
-### 2. Instale as Dependências
+### 2. Configure os Modelos Ollama
 ```bash
-pip install requirements.txt
+# Instale os modelos desejados
+ollama pull llama3
+ollama pull mistral
+ollama pull neural-chat
 ```
 
-### 3. Configure as Credenciais do Google
-1. Acesse [Google Cloud Console](https://console.cloud.google.com)
-2. Crie um projeto e ative a Gmail API
-3. Baixe o arquivo `credentials.json` para a pasta do projeto
+### 3. Configure a Base de Conhecimento
+Crie os arquivos de contexto conforme exemplos na documentação.
 
-### 4. Configure a Base de Conhecimento
-Crie os arquivos com as informações da sua empresa:
-
-**produtos.txt**
-```
-CATÁLOGO DE PRODUTOS:
-
-PANELAS:
-- Panela Antiaderente 24cm: R$ 89,90 | Código: PAN24
-- Panela Antiaderente 28cm: R$ 119,90 | Código: PAN28
-
-TALHERES:
-- Talheres Inox 24 peças: R$ 129,90 | Código: TAL24
-
-DESCONTOS:
-- Acima de R$ 500: 5% desconto
-- Acima de R$ 1000: 10% desconto
-```
-
-**politicas.txt**
-```
-POLÍTICAS DA EMPRESA:
-
-TROCAS E DEVOLUÇÕES:
-- Prazo para trocas: 30 dias
-- Produtos com defeito: 90 dias de garantia
-- Necessário nota fiscal
-```
-
-### 5. Execute o Sistema
+### 4. Execute o Sistema
 ```bash
-python email_agent.py
+python main.py
+```
+
+## 🎮 Como Usar
+
+### Acessando o Dashboard
+```
+🌐 http://localhost:8081
+```
+
+### Configurando o A/B Testing
+No arquivo `main.py`, ajuste:
+```python
+AB_MODELS = [
+    {"name": "llama3", "description": "Llama 3", "weight": 2.0},  # Mais chance
+    {"name": "mistral", "description": "Mistral", "weight": 1.0},
+]
+```
+
+### Visualizando Avaliações
+```
+📝 Log completo: avaliacoes_llm_juiz.txt
+📊 Dashboard: http://localhost:8081
+📈 Dados JSON: http://localhost:8081/data
 ```
 
 ## 📁 Estrutura do Projeto
 
 ```
 email-agent-market/
-├── email_agent.py          # Arquivo principal
-├── credentials.json        # Credenciais Google API
-├── token.json             # Token de autenticação (gerado automaticamente)
-├── clientes.db           # Banco de dados SQLite
-├── produtos.txt          # Catálogo de produtos
-├── politicas.txt         # Políticas da empresa
-├── financeiro.txt        # Condições financeiras
-├── entregas.txt          # Informações de entrega
-└── README.md            # Este arquivo
+├── main.py                 # Sistema principal (v2.0)
+├── mlops.db                # Banco MLOPS (A/B testing + avaliações)
+├── clientes.db             # Banco de emails processados
+├── avaliacoes_llm_juiz.txt # Log completo das avaliações
+├── credentials.json        # Credenciais Google
+├── token.json              # Token de autenticação
+├── produtos.txt            # Base de conhecimento
+├── politicas.txt           # Políticas da empresa
+├── financeiro.txt          # Informações financeiras
+├── entregas.txt            # Dados de entrega
+└── README.md               # Documentação
 ```
 
-## 🔧 Como Funciona
+## 🔬 Como Funciona o MLOPS
 
-### Fluxo do Sistema
-1. **Monitoramento**: Verifica novos emails a cada 5 minutos
-2. **Classificação**: Detecta automaticamente as intenções do cliente
-3. **Contextualização**: Busca informações relevantes nos arquivos RAG
-4. **Geração**: Cria resposta personalizada usando Ollama + contexto
-5. **Envio**: Responde o email automaticamente
-6. **Registro**: Marca como processado para evitar duplicatas
+### Fluxo de Decisão
+1. **Email Chega** → Detecção de intenções
+2. **Seleção de Modelo** → A/B Testing baseado em pesos (mas no meu experimento, todos os modelos tem o mesmo peso)
+3. **Geração com RAG** → Contexto + modelo selecionado
+4. **Resposta e Registro** → Salva no banco e envia
+5. **Avaliação Automática** → LLM Juiz avalia a resposta
+6. **Dashboard Atualizado** → Métricas em tempo real
 
-### Exemplo de Funcionamento
-**Email Recebido:**
+### Exemplo de Avaliação
 ```
-Assunto: Problema com panela
-Corpo: Comprei uma panela e veio com defeito. Como faço a troca?
-```
-
-**Resposta Automática:**
-```
-Prezado cliente,
-
-Conforme nossas políticas, o prazo para trocas é de 30 dias...
-Para iniciar o processo, envie fotos para sac@empresa.com.br...
+AVALIAÇÃO #42 - 15/03/2024 14:30:22
+📧 Cliente: cliente@email.com
+🤖 Modelo: llama3
+📊 Pontuações:
+   • Clareza: 92/100
+   • Precisão: 88/100
+   • Empatia: 85/100
+   • PONTUAÇÃO GERAL: 89.5/100
 ```
 
-## 🎯 Casos de Uso
+## 📊 Dashboard em Ação
 
-### Varejo (Projeto Original)
-- Lojas de utensílios domésticos
-- Comércio eletrônico
-- Distribuidoras
-- Atacado
+### Cards Principais
+- **Respostas Enviadas** - Total processado
+- **Avaliações Realizadas** - Total de análises
+- **Modelos Ativos** - Quantidade em teste
+- **Nota Média** - Performance geral
 
-### Adaptação para Outros Ramos
-- **Serviços**: Consultorias, agências
-- **Saúde**: Clínicas, laboratórios, hospitais
-- **Educação**: Escolas, cursos, universidades
-- **Imobiliária**: Corretores, incorporadoras
-
-**Como adaptar:** Basta substituir os arquivos RAG pelo conhecimento específico do seu ramo!
-
+### Gráficos e Tabelas
+- Distribuição de uso por modelo
+- Avaliações recentes com notas
+- Estatísticas de seleção do A/B Testing
+- Status completo do sistema
 
 ## 📄 Licença
 
-Distribuído sob licença MIT. Veja `LICENSE` para mais informações.
+MIT License - Use, modifique e distribua livremente.
 
 ## 👥 Autor
 
-- **Pablo Dantas** - *Desenvolvimento Inicial* - [Pablo Dantas](https://www.linkedin.com/in/pablodantasevangelista/)
+**Pablo Dantas** - [LinkedIn](https://www.linkedin.com/in/pablodantasevangelista/)
 
 ## 🙏 Agradecimentos
 
-- Equipe do Ollama pelos modelos de IA
-- Google pela API Gmail
-- Comunidade Python pelas bibliotecas incríveis
+- Comunidade Ollama pelos modelos excepcionais
+- Google pela API Gmail 
+- Contribuidores que sugerirem melhorias
 
 ---
 
-## 💡 Conclusão
+## 💡 Por que esse projeto eu considero empolgante?
 
-Este projeto representa a **evolução da produtividade empresarial** através da inteligência artificial. Mais do que um simples automatizador de emails, é um **assistente inteligente** que:
+Este projeto não é apenas um automatizador de emails - é um **laboratório de experimentação em produção** que pode ajudar a:
 
-- 🧠 **Aprende** com a base de conhecimento da empresa
-- ⚡ **Responde** com velocidade e precisão  
-- 🔄 **Escala** para atender milhares de clientes
-- 💰 **Economiza** recursos valiosos e tempo
-- 😊 **Satisfaz** tanto clientes quanto colaboradores
-
-
+1. **Aprende Continuamente**: Cada resposta é uma oportunidade de aprendizado
+2. **Toma Decisões Baseadas em Dados**: Não é "achismo", são métricas reais
+3. **Escala com Inteligência**: Mais emails = mais dados = melhores decisões
+4. **Garante Qualidade**: LLM Juiz mantém padrão consistente
+5. **É Transparente**: Dashboard e logs mostram exatamente o que acontece
 
 ---
-
-<div align="center">
-
-**⭐ Se este projeto te ajudou, deixe uma estrela no repositório!**
-
-</div>
